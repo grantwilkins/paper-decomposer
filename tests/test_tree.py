@@ -929,3 +929,397 @@ def test_assemble_tree_reattaches_low_level_method_using_structural_hints(
     walk(output.claim_tree)
     assert parent_by_child["m_top"] == "c1"
     assert parent_by_child["m_low"] == "m_top"
+
+
+def test_assemble_tree_prefers_top_level_method_for_top_line_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = PaperMetadata(title="Toy Paper", authors=["A"], venue="Conf", year=2025)
+    artifacts = [
+        EvidenceArtifact(
+            artifact_type="table",
+            artifact_id="table_1",
+            caption="End-to-end throughput across serving baselines.",
+            source_page=6,
+        )
+    ]
+    claims = [
+        RawClaim(
+            claim_id="c1",
+            claim_type=ClaimType.context,
+            statement="Serving throughput is limited by memory management overhead.",
+            source_section="1 Motivation",
+        ),
+        RawClaim(
+            claim_id="m_system",
+            claim_type=ClaimType.method,
+            statement="We introduce a paged serving system for KV cache management.",
+            source_section="3 Method",
+            structural_hints=ClaimStructuralHints(
+                local_role=ClaimLocalRole.top_level,
+                preferred_parent_type=ParentPreference.context,
+            ),
+        ),
+        RawClaim(
+            claim_id="m_kernel",
+            claim_type=ClaimType.method,
+            statement="A block table maps logical KV blocks to physical blocks during decoding.",
+            source_section="3.1 Kernel",
+            structural_hints=ClaimStructuralHints(
+                elaborates_seed_id="m_system",
+                local_role=ClaimLocalRole.mechanism,
+                preferred_parent_type=ParentPreference.method,
+            ),
+        ),
+        RawClaim(
+            claim_id="r_top",
+            claim_type=ClaimType.result,
+            statement="The system delivers 2-4x higher end-to-end throughput than baselines at the same latency.",
+            source_section="5 Results",
+            evidence=_evidence("table_1"),
+        ),
+    ]
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type[Any] | None = None,
+        config: Any | None = None,
+    ) -> Any:
+        _ = (tier, messages, response_schema, config)
+        return TreeAssemblyOutput(
+            one_liner=OneLiner(achieved="ok", via="ok", because="ok"),
+            nodes=[
+                TreeNodeAssignment(claim_id="c1", parent_id=None, depends_on=[]),
+                TreeNodeAssignment(claim_id="m_system", parent_id="c1", depends_on=["c1"]),
+                TreeNodeAssignment(claim_id="m_kernel", parent_id="m_system", depends_on=["m_system"]),
+                TreeNodeAssignment(claim_id="r_top", parent_id="m_kernel", depends_on=["m_kernel"]),
+            ],
+        )
+
+    monkeypatch.setattr(tree_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(
+        assemble_tree(
+            metadata=metadata,
+            claims=claims,
+            faceted=[],
+            negatives=[],
+            artifacts=artifacts,
+            config={"pipeline": {"tree": {"model_tier": "heavy"}}},
+        )
+    )
+
+    parent_by_child = _parent_map(output.claim_tree)
+    assert parent_by_child["r_top"] == "m_system"
+
+
+def test_assemble_tree_prefers_submechanism_method_for_local_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = PaperMetadata(title="Toy Paper", authors=["A"], venue="Conf", year=2025)
+    artifacts = [
+        EvidenceArtifact(
+            artifact_type="table",
+            artifact_id="table_2",
+            caption="Kernel overhead versus block size.",
+            source_page=7,
+        )
+    ]
+    claims = [
+        RawClaim(
+            claim_id="c1",
+            claim_type=ClaimType.context,
+            statement="Serving efficiency depends on managing KV memory without large decode overheads.",
+            source_section="1 Motivation",
+        ),
+        RawClaim(
+            claim_id="m_system",
+            claim_type=ClaimType.method,
+            statement="We introduce a paged serving system for KV cache management.",
+            source_section="3 Method",
+            structural_hints=ClaimStructuralHints(
+                local_role=ClaimLocalRole.top_level,
+                preferred_parent_type=ParentPreference.context,
+            ),
+        ),
+        RawClaim(
+            claim_id="m_kernel",
+            claim_type=ClaimType.method,
+            statement="A custom kernel uses block-wise gather to keep decode overhead low.",
+            source_section="3.1 Kernel",
+            structural_hints=ClaimStructuralHints(
+                elaborates_seed_id="m_system",
+                local_role=ClaimLocalRole.mechanism,
+                preferred_parent_type=ParentPreference.method,
+            ),
+        ),
+        RawClaim(
+            claim_id="r_kernel",
+            claim_type=ClaimType.result,
+            statement="Block size ablations show kernel overhead rises for very small blocks.",
+            source_section="5.3 Ablations",
+            evidence=_evidence("table_2"),
+        ),
+    ]
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type[Any] | None = None,
+        config: Any | None = None,
+    ) -> Any:
+        _ = (tier, messages, response_schema, config)
+        return TreeAssemblyOutput(
+            one_liner=OneLiner(achieved="ok", via="ok", because="ok"),
+            nodes=[
+                TreeNodeAssignment(claim_id="c1", parent_id=None, depends_on=[]),
+                TreeNodeAssignment(claim_id="m_system", parent_id="c1", depends_on=["c1"]),
+                TreeNodeAssignment(claim_id="m_kernel", parent_id="m_system", depends_on=["m_system"]),
+                TreeNodeAssignment(claim_id="r_kernel", parent_id="m_system", depends_on=["m_system"]),
+            ],
+        )
+
+    monkeypatch.setattr(tree_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(
+        assemble_tree(
+            metadata=metadata,
+            claims=claims,
+            faceted=[],
+            negatives=[],
+            artifacts=artifacts,
+            config={"pipeline": {"tree": {"model_tier": "heavy"}}},
+        )
+    )
+
+    parent_by_child = _parent_map(output.claim_tree)
+    assert parent_by_child["r_kernel"] == "m_kernel"
+
+
+def test_assemble_tree_suppresses_non_argumentative_method_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = PaperMetadata(title="Toy Paper", authors=["A"], venue="Conf", year=2025)
+    artifacts = [
+        EvidenceArtifact(
+            artifact_type="figure",
+            artifact_id="fig_1",
+            caption="Main method overview.",
+            source_page=2,
+        )
+    ]
+    claims = [
+        RawClaim(
+            claim_id="c1",
+            claim_type=ClaimType.context,
+            statement="Serving latency is constrained by cache management overhead.",
+            source_section="1 Motivation",
+        ),
+        RawClaim(
+            claim_id="m_main",
+            claim_type=ClaimType.method,
+            statement="We introduce adaptive cache partitioning to reduce synchronization overhead.",
+            source_section="3 Method",
+            evidence=[EvidencePointer(artifact_id="fig_1", role="supports")],
+            entity_names=["adaptive cache partitioning"],
+        ),
+        RawClaim(
+            claim_id="m_stack",
+            claim_type=ClaimType.method,
+            statement="The service uses Python API handlers.",
+            source_section="Appendix Implementation Details",
+        ),
+        RawClaim(
+            claim_id="r1",
+            claim_type=ClaimType.result,
+            statement="The method reduces p99 latency by 30 percent.",
+            source_section="5 Results",
+            evidence=[EvidencePointer(artifact_id="fig_1", role="supports")],
+        ),
+    ]
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type[Any] | None = None,
+        config: Any | None = None,
+    ) -> Any:
+        _ = (tier, messages, response_schema, config)
+        return TreeAssemblyOutput(
+            one_liner=OneLiner(achieved="ok", via="ok", because="ok"),
+            nodes=[
+                TreeNodeAssignment(claim_id="c1", parent_id=None, depends_on=[]),
+                TreeNodeAssignment(claim_id="m_main", parent_id="c1", depends_on=["c1"]),
+                TreeNodeAssignment(claim_id="m_stack", parent_id="c1", depends_on=["c1"]),
+                TreeNodeAssignment(claim_id="r1", parent_id="m_stack", depends_on=["m_stack"]),
+            ],
+        )
+
+    monkeypatch.setattr(tree_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(
+        assemble_tree(
+            metadata=metadata,
+            claims=claims,
+            faceted=[],
+            negatives=[],
+            artifacts=artifacts,
+            config={"pipeline": {"tree": {"model_tier": "heavy"}}},
+        )
+    )
+
+    all_nodes = list(_iter_nodes(output.claim_tree))
+    node_ids = {node.claim_id for node in all_nodes}
+    parent_by_child = _parent_map(output.claim_tree)
+
+    assert "m_stack" not in node_ids
+    assert parent_by_child["r1"] == "m_main"
+
+
+def test_assemble_tree_suppresses_low_strength_method_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = PaperMetadata(title="Toy Paper", authors=["A"], venue="Conf", year=2025)
+    artifacts = [
+        EvidenceArtifact(
+            artifact_type="figure",
+            artifact_id="fig_1",
+            caption="Main system overview.",
+            source_page=2,
+        )
+    ]
+    claims = [
+        RawClaim(
+            claim_id="c1",
+            claim_type=ClaimType.context,
+            statement="Serving systems need better memory management to sustain throughput.",
+            source_section="1 Motivation",
+        ),
+        RawClaim(
+            claim_id="m_main",
+            claim_type=ClaimType.method,
+            statement="We introduce adaptive cache partitioning to reduce synchronization overhead.",
+            source_section="3 Method",
+            evidence=[EvidencePointer(artifact_id="fig_1", role="supports")],
+            entity_names=["adaptive cache partitioning"],
+            structural_hints=ClaimStructuralHints(local_role=ClaimLocalRole.top_level),
+            claim_strength=3.8,
+        ),
+        RawClaim(
+            claim_id="m_detail",
+            claim_type=ClaimType.method,
+            statement="The cache manager exposes tuning hooks.",
+            source_section="Appendix Implementation Details",
+            structural_hints=ClaimStructuralHints(
+                elaborates_seed_id="m_main",
+                local_role=ClaimLocalRole.implementation_detail,
+                preferred_parent_type=ParentPreference.method,
+            ),
+            claim_strength=1.4,
+        ),
+        RawClaim(
+            claim_id="r1",
+            claim_type=ClaimType.result,
+            statement="The system improves throughput by 35 percent on long-context workloads.",
+            source_section="5 Results",
+            evidence=[EvidencePointer(artifact_id="fig_1", role="supports")],
+        ),
+    ]
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type[Any] | None = None,
+        config: Any | None = None,
+    ) -> Any:
+        _ = (tier, messages, response_schema, config)
+        return TreeAssemblyOutput(
+            one_liner=OneLiner(achieved="ok", via="ok", because="ok"),
+            nodes=[
+                TreeNodeAssignment(claim_id="c1", parent_id=None, depends_on=[]),
+                TreeNodeAssignment(claim_id="m_main", parent_id="c1", depends_on=["c1"]),
+                TreeNodeAssignment(claim_id="m_detail", parent_id="m_main", depends_on=["m_main"]),
+                TreeNodeAssignment(claim_id="r1", parent_id="m_detail", depends_on=["m_detail"]),
+            ],
+        )
+
+    monkeypatch.setattr(tree_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(
+        assemble_tree(
+            metadata=metadata,
+            claims=claims,
+            faceted=[],
+            negatives=[],
+            artifacts=artifacts,
+            config={"pipeline": {"tree": {"model_tier": "heavy"}}},
+        )
+    )
+
+    all_nodes = list(_iter_nodes(output.claim_tree))
+    node_ids = {node.claim_id for node in all_nodes}
+    parent_by_child = _parent_map(output.claim_tree)
+
+    assert "m_detail" not in node_ids
+    assert parent_by_child["r1"] == "m_main"
+
+
+def test_assemble_tree_folds_suppressed_method_evidence_into_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = PaperMetadata(title="Toy Paper", authors=["A"], venue="Conf", year=2025)
+    claims = [
+        RawClaim(
+            claim_id="c1",
+            claim_type=ClaimType.context,
+            statement="Inference systems face memory pressure during long decoding.",
+            source_section="1 Motivation",
+        ),
+        RawClaim(
+            claim_id="m_main",
+            claim_type=ClaimType.method,
+            statement="We introduce hierarchical cache compaction for long-context decoding.",
+            source_section="3 Method",
+            evidence=[EvidencePointer(artifact_id="fig_1", role="supports")],
+            entity_names=["hierarchical cache compaction"],
+        ),
+        RawClaim(
+            claim_id="m_short",
+            claim_type=ClaimType.method,
+            statement="We use PyTorch APIs.",
+            source_section="Appendix Implementation Details",
+            evidence=[EvidencePointer(artifact_id="table_9", role="supports")],
+        ),
+    ]
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type[Any] | None = None,
+        config: Any | None = None,
+    ) -> Any:
+        _ = (tier, messages, response_schema, config)
+        return TreeAssemblyOutput(
+            one_liner=OneLiner(achieved="ok", via="ok", because="ok"),
+            nodes=[
+                TreeNodeAssignment(claim_id="c1", parent_id=None, depends_on=[]),
+                TreeNodeAssignment(claim_id="m_main", parent_id="c1", depends_on=["c1"]),
+                TreeNodeAssignment(claim_id="m_short", parent_id="m_main", depends_on=["m_main"]),
+            ],
+        )
+
+    monkeypatch.setattr(tree_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(
+        assemble_tree(
+            metadata=metadata,
+            claims=claims,
+            faceted=[],
+            negatives=[],
+            artifacts=[],
+            config={"pipeline": {"tree": {"model_tier": "heavy"}}},
+        )
+    )
+
+    all_nodes = list(_iter_nodes(output.claim_tree))
+    node_by_id = {node.claim_id: node for node in all_nodes}
+    m_main_evidence_ids = {pointer.artifact_id for pointer in node_by_id["m_main"].evidence}
+
+    assert "m_short" not in node_by_id
+    assert {"fig_1", "table_9"} <= m_main_evidence_ids
