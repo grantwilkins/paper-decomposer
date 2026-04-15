@@ -1323,3 +1323,256 @@ def test_assemble_tree_folds_suppressed_method_evidence_into_parent(
 
     assert "m_short" not in node_by_id
     assert {"fig_1", "table_9"} <= m_main_evidence_ids
+
+
+def test_assemble_tree_repairs_primitive_under_system_inversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = PaperMetadata(title="Toy Paper", authors=["A"], venue="Conf", year=2025)
+    claims = [
+        RawClaim(
+            claim_id="c1",
+            claim_type=ClaimType.context,
+            statement="Contiguous KV allocation wastes memory and constrains throughput.",
+            source_section="1 Motivation",
+        ),
+        RawClaim(
+            claim_id="m_primitive",
+            claim_type=ClaimType.method,
+            statement="PagedAttention is an attention algorithm that maps logical KV blocks to physical blocks.",
+            source_section="4.1 PagedAttention",
+            entity_names=["PagedAttention"],
+            structural_hints=ClaimStructuralHints(local_role=ClaimLocalRole.mechanism),
+        ),
+        RawClaim(
+            claim_id="m_system",
+            claim_type=ClaimType.method,
+            statement="vLLM leverages PagedAttention in an end-to-end serving system.",
+            source_section="4 Method",
+            entity_names=["vLLM", "PagedAttention"],
+            structural_hints=ClaimStructuralHints(local_role=ClaimLocalRole.top_level),
+        ),
+    ]
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type[Any] | None = None,
+        config: Any | None = None,
+    ) -> Any:
+        _ = (tier, messages, response_schema, config)
+        return TreeAssemblyOutput(
+            one_liner=OneLiner(achieved="ok", via="ok", because="ok"),
+            nodes=[
+                TreeNodeAssignment(claim_id="c1", parent_id=None, depends_on=[]),
+                TreeNodeAssignment(claim_id="m_system", parent_id="c1", depends_on=["c1"]),
+                TreeNodeAssignment(claim_id="m_primitive", parent_id="m_system", depends_on=["m_system"]),
+            ],
+        )
+
+    monkeypatch.setattr(tree_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(
+        assemble_tree(
+            metadata=metadata,
+            claims=claims,
+            faceted=[],
+            negatives=[],
+            artifacts=[],
+            config={"pipeline": {"tree": {"model_tier": "heavy"}}},
+        )
+    )
+
+    parent_by_child = _parent_map(output.claim_tree)
+    assert parent_by_child["m_primitive"] != "m_system"
+    assert parent_by_child["m_primitive"] == "c1"
+
+
+def test_assemble_tree_sanitizes_descendant_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = PaperMetadata(title="Toy Paper", authors=["A"], venue="Conf", year=2025)
+    claims = [
+        RawClaim(
+            claim_id="c1",
+            claim_type=ClaimType.context,
+            statement="GPU memory pressure limits serving throughput.",
+            source_section="1 Motivation",
+        ),
+        RawClaim(
+            claim_id="m1",
+            claim_type=ClaimType.method,
+            statement="We introduce paged KV cache management for serving.",
+            source_section="4 Method",
+            structural_hints=ClaimStructuralHints(local_role=ClaimLocalRole.top_level),
+            claim_strength=3.6,
+        ),
+        RawClaim(
+            claim_id="m2",
+            claim_type=ClaimType.method,
+            statement="A scheduler preempts sequence groups under memory pressure.",
+            source_section="4.5 Scheduling",
+            structural_hints=ClaimStructuralHints(local_role=ClaimLocalRole.implementation_detail),
+            evidence=[EvidencePointer(artifact_id="fig_sched", role="supports")],
+            claim_strength=3.2,
+        ),
+    ]
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type[Any] | None = None,
+        config: Any | None = None,
+    ) -> Any:
+        _ = (tier, messages, response_schema, config)
+        return TreeAssemblyOutput(
+            one_liner=OneLiner(achieved="ok", via="ok", because="ok"),
+            nodes=[
+                TreeNodeAssignment(claim_id="c1", parent_id=None, depends_on=[]),
+                TreeNodeAssignment(claim_id="m1", parent_id="c1", depends_on=["m2"]),
+                TreeNodeAssignment(claim_id="m2", parent_id="m1", depends_on=["m1"]),
+            ],
+        )
+
+    monkeypatch.setattr(tree_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(
+        assemble_tree(
+            metadata=metadata,
+            claims=claims,
+            faceted=[],
+            negatives=[],
+            artifacts=[],
+            config={"pipeline": {"tree": {"model_tier": "heavy"}}},
+        )
+    )
+
+    node_by_id = {node.claim_id: node for node in _iter_nodes(output.claim_tree)}
+    assert node_by_id["m1"].depends_on == ["c1"]
+    assert "m2" in node_by_id
+
+
+def test_assemble_tree_blocks_observational_method_as_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = PaperMetadata(title="Toy Paper", authors=["A"], venue="Conf", year=2025)
+    claims = [
+        RawClaim(
+            claim_id="c1",
+            claim_type=ClaimType.context,
+            statement="KV cache waste limits throughput.",
+            source_section="1 Motivation",
+        ),
+        RawClaim(
+            claim_id="m_obs",
+            claim_type=ClaimType.method,
+            statement=(
+                "The number of requests that can be batched together is constrained by GPU memory "
+                "capacity, making serving memory-bound."
+            ),
+            source_section="3 Memory Challenges",
+        ),
+        RawClaim(
+            claim_id="m_main",
+            claim_type=ClaimType.method,
+            statement="vLLM leverages paged KV cache management to increase batch size.",
+            source_section="4 Method",
+            entity_names=["vLLM"],
+            structural_hints=ClaimStructuralHints(local_role=ClaimLocalRole.top_level),
+        ),
+        RawClaim(
+            claim_id="r1",
+            claim_type=ClaimType.result,
+            statement="vLLM achieves 2x higher throughput than Orca at similar latency.",
+            source_section="5 Results",
+        ),
+    ]
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type[Any] | None = None,
+        config: Any | None = None,
+    ) -> Any:
+        _ = (tier, messages, response_schema, config)
+        return TreeAssemblyOutput(
+            one_liner=OneLiner(achieved="ok", via="ok", because="ok"),
+            nodes=[
+                TreeNodeAssignment(claim_id="c1", parent_id=None, depends_on=[]),
+                TreeNodeAssignment(claim_id="m_obs", parent_id="c1", depends_on=["c1"]),
+                TreeNodeAssignment(claim_id="m_main", parent_id="c1", depends_on=["c1"]),
+                TreeNodeAssignment(claim_id="r1", parent_id="m_obs", depends_on=["m_obs"]),
+            ],
+        )
+
+    monkeypatch.setattr(tree_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(
+        assemble_tree(
+            metadata=metadata,
+            claims=claims,
+            faceted=[],
+            negatives=[],
+            artifacts=[],
+            config={"pipeline": {"tree": {"model_tier": "heavy"}}},
+        )
+    )
+
+    node_by_id = {node.claim_id: node for node in _iter_nodes(output.claim_tree)}
+    parent_by_child = _parent_map(output.claim_tree)
+    assert node_by_id["m_obs"].claim_type == ClaimType.context
+    assert parent_by_child["r1"] == "m_main"
+
+
+def test_assemble_tree_reattaches_derivative_context_under_core_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = PaperMetadata(title="Toy Paper", authors=["A"], venue="Conf", year=2025)
+    claims = [
+        RawClaim(
+            claim_id="c_core",
+            claim_type=ClaimType.context,
+            statement="Existing systems waste KV cache memory due to fragmentation bottlenecks.",
+            source_section="1 Motivation",
+        ),
+        RawClaim(
+            claim_id="c_derivative",
+            claim_type=ClaimType.context,
+            statement="Only 20-40 percent of KV cache memory stores actual token states in practice.",
+            source_section="3.1 Memory Characterization",
+        ),
+        RawClaim(
+            claim_id="m1",
+            claim_type=ClaimType.method,
+            statement="We introduce paged KV cache management to reduce memory waste.",
+            source_section="4 Method",
+        ),
+    ]
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type[Any] | None = None,
+        config: Any | None = None,
+    ) -> Any:
+        _ = (tier, messages, response_schema, config)
+        return TreeAssemblyOutput(
+            one_liner=OneLiner(achieved="ok", via="ok", because="ok"),
+            nodes=[
+                TreeNodeAssignment(claim_id="c_core", parent_id=None, depends_on=[]),
+                TreeNodeAssignment(claim_id="c_derivative", parent_id=None, depends_on=[]),
+                TreeNodeAssignment(claim_id="m1", parent_id="c_core", depends_on=["c_core"]),
+            ],
+        )
+
+    monkeypatch.setattr(tree_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(
+        assemble_tree(
+            metadata=metadata,
+            claims=claims,
+            faceted=[],
+            negatives=[],
+            artifacts=[],
+            config={"pipeline": {"tree": {"model_tier": "heavy"}}},
+        )
+    )
+
+    parent_by_child = _parent_map(output.claim_tree)
+    assert parent_by_child["c_derivative"] == "c_core"

@@ -217,6 +217,8 @@ _NEGATIVE_CUE_RE = re.compile(
 # context or result, never method.
 _OBSERVATION_CONSTRAINT_RE = re.compile(
     r"""
+    \b(is|are)\s+(constrained|limited|bounded|dominated)\b
+    |
     \bis\s+\w+[-\s]bound\b              # "is memory-bound", "is I/O-bound"
     | \bare\s+\w+[-\s]bound\b           # plural: "are bandwidth-bound"
     | \bgrows?\b.{0,50}\bwith\b         # "grows quickly with N"
@@ -267,6 +269,14 @@ _FRAMEWORK_USAGE_RE = re.compile(
 _API_SURFACE_RE = re.compile(
     r"\b(api|interface|endpoint|frontend|ui|web app|cli|sdk|openai compatible|allows users to|allows user to)\b",
     re.IGNORECASE,
+)
+_STACK_INVENTORY_RE = re.compile(
+    r"""
+    \b(control[-\s]?related|runtime|scheduler|manager|components?)\b.{0,80}\b(developed|implemented|written)\s+in\b
+    | \b(written|implemented|developed)\s+in\s+(python|cuda|c\+\+|rust|go|java)\b
+    | \b(custom\s+cuda\s+kernels?|python\s+control\s+components?)\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 _TAUTOLOGICAL_OPERATION_RE = re.compile(
     r"(append(?:s|ed|ing)?\s+(?:a|the)?\s*token|free(?:s|d|ing)?\s+(?:a|the)?\s*sequence|delete(?:s|d|ing)?\s+(?:a|the)?\s*sequence)",
@@ -519,6 +529,8 @@ def _retag_claim_type(claim_type: ClaimType, statement: str, role: RhetoricalRol
     has_method = bool(_MECHANISM_CUE_RE.search(lowered))
     has_assumption = bool(_ASSUMPTION_CUE_RE.search(lowered))
     has_context = bool(_CONTEXT_CUE_RE.search(lowered))
+    has_agency = bool(_ACTIVE_METHOD_AGENCY_RE.search(lowered))
+    is_observation = bool(_OBSERVATION_CONSTRAINT_RE.search(lowered))
 
     if claim_type == ClaimType.negative or has_negative:
         return ClaimType.negative
@@ -539,11 +551,8 @@ def _retag_claim_type(claim_type: ClaimType, statement: str, role: RhetoricalRol
     # contextual observations or bottleneck facts regardless of what section they appear in.
     # Guard: only fires when no mechanism-action vocabulary is present AND no
     # paper-agency construction is detected, so legitimate method claims are unaffected.
-    if claim_type == ClaimType.method and not has_method:
-        is_observation = bool(_OBSERVATION_CONSTRAINT_RE.search(lowered))
-        has_agency = bool(_ACTIVE_METHOD_AGENCY_RE.search(lowered))
-        if is_observation and not has_agency:
-            return ClaimType.context
+    if claim_type == ClaimType.method and is_observation and not has_agency:
+        return ClaimType.context
 
     if role in {RhetoricalRole.evaluation, RhetoricalRole.appendix}:
         if claim_type in {ClaimType.method, ClaimType.context, ClaimType.assumption} and has_result:
@@ -552,7 +561,7 @@ def _retag_claim_type(claim_type: ClaimType, statement: str, role: RhetoricalRol
     if role in {RhetoricalRole.method, RhetoricalRole.theory}:
         if claim_type in {ClaimType.context, ClaimType.method, ClaimType.assumption} and has_result and not has_method:
             return ClaimType.result
-        if claim_type in {ClaimType.context, ClaimType.result} and has_method and not has_result:
+        if claim_type in {ClaimType.context, ClaimType.result} and has_method and has_agency and not has_result:
             return ClaimType.method
 
     if role == RhetoricalRole.background:
@@ -562,10 +571,10 @@ def _retag_claim_type(claim_type: ClaimType, statement: str, role: RhetoricalRol
     if claim_type == ClaimType.context and has_result and role == RhetoricalRole.evaluation:
         return ClaimType.result
 
-    if claim_type == ClaimType.context and has_method and not has_context:
+    if claim_type == ClaimType.context and has_method and has_agency and not has_context:
         return ClaimType.method
 
-    if claim_type == ClaimType.result and has_method and not has_result:
+    if claim_type == ClaimType.result and has_method and has_agency and not has_result:
         return ClaimType.method
 
     return claim_type
@@ -787,6 +796,8 @@ def _matches_hard_suppression_pattern(claim: RawClaim) -> bool:
     if _CODEBASE_FACT_RE.search(lowered):
         return True
     if _TAUTOLOGICAL_OPERATION_RE.search(lowered):
+        return True
+    if _STACK_INVENTORY_RE.search(lowered):
         return True
 
     if not _has_argumentative_force(claim):

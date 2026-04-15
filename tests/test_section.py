@@ -487,6 +487,138 @@ def test_extract_section_claims_evaluation_requires_findings_not_restatements(
     assert output.claims[0].claim_type == ClaimType.result
 
 
+def test_extract_section_claims_demotes_observational_method_to_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    section = Section(
+        section_number="1",
+        title="Introduction",
+        role=RhetoricalRole.introduction,
+        body_text="Motivation.",
+        char_count=10,
+    )
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type | None = None,
+        config: dict | None = None,
+    ) -> FlatSectionOutput:
+        assert tier == "small"
+        assert response_schema is FlatSectionOutput
+        return FlatSectionOutput(
+            claims=[
+                FlatClaim(
+                    claim_id="m_obs",
+                    claim_type=ClaimType.method.value,
+                    statement=(
+                        "The number of requests that can be batched together is constrained by GPU memory "
+                        "capacity, making the system memory-bound."
+                    ),
+                )
+            ]
+        )
+
+    monkeypatch.setattr(section_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(extract_section_claims(section, [], [], {"pipeline": {"section_extraction": {}}}))
+    claim_by_id = {claim.claim_id: claim for claim in output.claims}
+
+    assert "m_obs" in claim_by_id
+    assert claim_by_id["m_obs"].claim_type == ClaimType.context
+
+
+def test_extract_section_claims_keeps_agency_mechanism_as_method(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    section = Section(
+        section_number="4",
+        title="Method",
+        role=RhetoricalRole.method,
+        body_text="Method.",
+        char_count=7,
+    )
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type | None = None,
+        config: dict | None = None,
+    ) -> FlatSectionOutput:
+        assert tier == "small"
+        assert response_schema is FlatSectionOutput
+        return FlatSectionOutput(
+            claims=[
+                FlatClaim(
+                    claim_id="m_agency",
+                    claim_type=ClaimType.context.value,
+                    statement=(
+                        "We design a block-table mapping mechanism that routes logical KV blocks to "
+                        "physical blocks during decoding."
+                    ),
+                    entity_names=["block table"],
+                    evidence_ids=["Fig. 1"],
+                )
+            ]
+        )
+
+    monkeypatch.setattr(section_prompts, "call_model", _fake_call_model)
+    artifacts = [EvidenceArtifact(artifact_type="figure", artifact_id="Fig. 1", caption="Method.", source_page=4)]
+    output = asyncio.run(extract_section_claims(section, [], artifacts, {"pipeline": {"section_extraction": {}}}))
+    claim_by_id = {claim.claim_id: claim for claim in output.claims}
+
+    assert "m_agency" in claim_by_id
+    assert claim_by_id["m_agency"].claim_type == ClaimType.method
+
+
+def test_extract_section_claims_suppresses_stack_inventory_statements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    section = Section(
+        section_number="5",
+        title="Implementation Details",
+        role=RhetoricalRole.method,
+        body_text="Implementation.",
+        char_count=14,
+    )
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type | None = None,
+        config: dict | None = None,
+    ) -> FlatSectionOutput:
+        assert tier == "small"
+        assert response_schema is FlatSectionOutput
+        return FlatSectionOutput(
+            claims=[
+                FlatClaim(
+                    claim_id="m_stack",
+                    claim_type=ClaimType.method.value,
+                    statement=(
+                        "Control-related components, including the scheduler and block manager, are "
+                        "developed in Python while custom CUDA kernels are used for PagedAttention."
+                    ),
+                    entity_names=["scheduler", "block manager", "Python", "CUDA"],
+                ),
+                FlatClaim(
+                    claim_id="m_core",
+                    claim_type=ClaimType.method.value,
+                    statement="We implement a cache manager that allocates paged KV blocks to reduce fragmentation.",
+                    entity_names=["cache manager", "paged KV blocks"],
+                    evidence_ids=["Fig. 2"],
+                ),
+            ]
+        )
+
+    monkeypatch.setattr(section_prompts, "call_model", _fake_call_model)
+    artifacts = [EvidenceArtifact(artifact_type="figure", artifact_id="Fig. 2", caption="Core method.", source_page=5)]
+    output = asyncio.run(extract_section_claims(section, [], artifacts, {"pipeline": {"section_extraction": {}}}))
+
+    ids = {claim.claim_id for claim in output.claims}
+    assert "m_core" in ids
+    assert "m_stack" not in ids
+
+
 @pytest.mark.api
 @requires_api_key
 def test_extract_section_claims_for_method_and_evaluation() -> None:

@@ -280,6 +280,69 @@ _API_VERB_TOKENS = {
     "returns",
 }
 
+_PRIMITIVE_METHOD_TOKENS = {
+    "algorithm",
+    "attention",
+    "formal",
+    "formalization",
+    "mechanism",
+    "paging",
+    "pagedattention",
+    "primitive",
+}
+
+_SYSTEM_REALIZATION_TOKENS = {
+    "engine",
+    "framework",
+    "runtime",
+    "serving",
+    "service",
+    "system",
+    "vllm",
+}
+
+_SUBMECHANISM_METHOD_TOKENS = _LOW_LEVEL_METHOD_TOKENS | {
+    "blocktable",
+    "cachemanager",
+    "eviction",
+    "preemption",
+}
+
+_TOP_LINE_BASELINE_RE = re.compile(
+    r"\b(vs|versus|baseline|baselines|fastertransformer|orca|request rates?|qps)\b",
+    re.IGNORECASE,
+)
+
+_TOP_LINE_METRIC_RE = re.compile(
+    r"\b(end[- ]to[- ]end|throughput|latency|speedup|request rates?|same latency|higher throughput)\b",
+    re.IGNORECASE,
+)
+
+_METHOD_INSTANTIATION_RE = re.compile(
+    r"\b(leverages?|builds? on|built on|uses?|implements?|instantiates?|powered by|based on)\b",
+    re.IGNORECASE,
+)
+
+_OBSERVATIONAL_METHOD_RE = re.compile(
+    r"""
+    \b(is|are)\s+(constrained|limited|bounded|dominated)\b
+    | \bis\s+\w+[-\s]bound\b
+    | \bare\s+\w+[-\s]bound\b
+    | \baccounts?\s+for\b
+    | \brepresents?\s+\S+\s+of\b
+    | \bgrows?\b.{0,40}\bwith\b
+    | \b(is|are)\s+(often|typically|generally|usually)\s+(limited|bounded|constrained|dominated)\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_ACTIVE_METHOD_AGENCY_RE = re.compile(
+    r"\bwe\s+(introduce|propose|present|design|build|implement|develop|leverage|employ)\b"
+    r"|\bour\s+(system|approach|framework|method|design|algorithm|technique)\b"
+    r"|\bthis\s+(paper|work)\s+(introduce|propose|present|describe|design|develop)\b",
+    re.IGNORECASE,
+)
+
 
 def _claim_tokens(text: str) -> set[str]:
     lowered = _clean_text(text).lower()
@@ -357,13 +420,23 @@ def _parent_level_prior(child: RawClaim, parent: RawClaim) -> float:
     if child.claim_type == ClaimType.result:
         scope = _classify_result_scope(child)
         if scope == "top_level":
-            return 1.0 if _is_top_level_method(parent) else 0.3
+            if _is_system_realization_method(parent):
+                return 1.0
+            if _is_primitive_method(parent):
+                return 0.55
+            return 0.25
         if scope == "submechanism":
             return 1.0 if _is_submechanism_method(parent) else 0.3
     if child.claim_type == ClaimType.method:
-        if _is_low_level_method(child):
-            return 1.0 if _is_submechanism_method(parent) else 0.4
-        return 1.0 if _is_top_level_method(parent) else 0.5
+        child_level = _method_abstraction_level(child)
+        parent_level = _method_abstraction_level(parent)
+        if child_level == "submechanism":
+            return 1.0 if parent_level in {"primitive", "system_realization", "submechanism"} else 0.4
+        if child_level == "system_realization":
+            return 1.0 if parent_level in {"primitive", "system_realization"} else 0.45
+        if child_level == "primitive":
+            return 1.0 if parent_level == "primitive" else 0.3
+        return 0.6
     return 0.7
 
 
@@ -439,26 +512,177 @@ def _method_local_role(claim: RawClaim) -> ClaimLocalRole | None:
     return hints.local_role
 
 
-def _is_top_level_method(claim: RawClaim) -> bool:
+def _section_rank(source_section: str) -> tuple[int, ...]:
+    normalized = _clean_text(source_section).lower()
+    match = re.search(r"\b(\d+(?:\.\d+)*)\b", normalized)
+    if not match:
+        if "abstract" in normalized:
+            return (0,)
+        if "introduction" in normalized:
+            return (1,)
+        if "conclusion" in normalized or "discussion" in normalized:
+            return (99,)
+        return (50,)
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _method_abstraction_level(claim: RawClaim) -> str:
+    """Return one of: primitive | system_realization | submechanism."""
     local_role = _method_local_role(claim)
-    if local_role == ClaimLocalRole.top_level:
-        return True
-    if local_role in {ClaimLocalRole.mechanism, ClaimLocalRole.implementation_detail}:
-        return False
+    if local_role == ClaimLocalRole.implementation_detail:
+        return "submechanism"
 
     statement = _clean_text(claim.statement).lower()
-    if any(hint in statement for hint in _HIGH_LEVEL_METHOD_HINTS):
+    tokens = _claim_tokens(statement)
+    entities = {entity.strip().lower() for entity in claim.entity_names if entity.strip()}
+
+    primitive_hits = len(tokens & _PRIMITIVE_METHOD_TOKENS)
+    system_hits = len(tokens & _SYSTEM_REALIZATION_TOKENS)
+    sub_hits = len(tokens & _SUBMECHANISM_METHOD_TOKENS)
+
+    if any("pagedattention" in entity or "algorithm" in entity for entity in entities):
+        primitive_hits += 2
+    if any("vllm" in entity or "system" in entity or "runtime" in entity for entity in entities):
+        system_hits += 2
+    if any(
+        key in entity
+        for entity in entities
+        for key in ("scheduler", "allocator", "kernel", "cache manager", "block table")
+    ):
+        sub_hits += 2
+
+    # Prompt/hint default first.
+    if local_role == ClaimLocalRole.top_level:
+        default_level = "system_realization"
+    elif local_role == ClaimLocalRole.mechanism:
+        default_level = "submechanism"
+    else:
+        default_level = "system_realization"
+
+    # Deterministic override second.
+    if sub_hits >= 3 and system_hits <= primitive_hits + 1:
+        return "submechanism"
+    if system_hits >= primitive_hits + 1 and system_hits >= 2:
+        return "system_realization"
+    if primitive_hits >= max(2, system_hits):
+        return "primitive"
+    if _is_low_level_method(claim):
+        return "submechanism"
+    return default_level
+
+
+def _is_system_realization_method(claim: RawClaim) -> bool:
+    return _method_abstraction_level(claim) == "system_realization"
+
+
+def _is_primitive_method(claim: RawClaim) -> bool:
+    return _method_abstraction_level(claim) == "primitive"
+
+
+def _has_explicit_instantiation_evidence(system_claim: RawClaim, primitive_claim: RawClaim) -> bool:
+    if system_claim.claim_id == primitive_claim.claim_id:
+        return False
+
+    system_text = _clean_text(system_claim.statement).lower()
+    primitive_entities = {
+        entity.strip().lower()
+        for entity in primitive_claim.entity_names
+        if entity.strip() and len(entity.strip()) > 2
+    }
+    primitive_tokens = _claim_tokens(primitive_claim.statement)
+    shared_entities = {
+        entity.strip().lower()
+        for entity in system_claim.entity_names
+        if entity.strip()
+    } & primitive_entities
+
+    mentions_primitive_name = any(entity in system_text for entity in primitive_entities)
+    token_overlap = bool(_claim_tokens(system_claim.statement) & primitive_tokens)
+    verb_signal = bool(_METHOD_INSTANTIATION_RE.search(system_text))
+    seed_link = (
+        (system_claim.structural_hints is not None and system_claim.structural_hints.elaborates_seed_id == primitive_claim.claim_id)
+        or (
+            primitive_claim.structural_hints is not None
+            and primitive_claim.structural_hints.elaborates_seed_id == system_claim.claim_id
+        )
+    )
+    section_progression = _section_rank(system_claim.source_section) >= _section_rank(primitive_claim.source_section)
+
+    if seed_link:
         return True
-    return _method_specificity_score(claim) <= 1
+    if verb_signal and (mentions_primitive_name or shared_entities):
+        return True
+    if mentions_primitive_name and token_overlap and section_progression:
+        return True
+    return False
+
+
+def _is_observational_method_statement(claim: RawClaim) -> bool:
+    statement = _clean_text(claim.statement).lower()
+    if not _OBSERVATIONAL_METHOD_RE.search(statement):
+        return False
+    if _ACTIVE_METHOD_AGENCY_RE.search(statement):
+        return False
+    return True
+
+
+def _context_problem_signal_count(claim: RawClaim) -> int:
+    text = _clean_text(claim.statement).lower()
+    cues = (
+        "bottleneck",
+        "challenge",
+        "gap",
+        "insufficient",
+        "limitation",
+        "problem",
+        "waste",
+    )
+    return sum(1 for cue in cues if cue in text)
+
+
+def _is_derivative_context_claim(claim: RawClaim, core_contexts: list[RawClaim]) -> bool:
+    if not core_contexts:
+        return False
+    if _context_problem_signal_count(claim) > 0:
+        return False
+
+    overlaps = [
+        _token_overlap_score(claim.statement, core_context.statement)
+        for core_context in core_contexts
+    ]
+    best_overlap = max(overlaps, default=0.0)
+    claim_tokens = _claim_tokens(claim.statement)
+    best_overlap_tokens = max(
+        (len(claim_tokens & _claim_tokens(core_context.statement)) for core_context in core_contexts),
+        default=0,
+    )
+    statement = _clean_text(claim.statement).lower()
+    quantifies_existing = bool(
+        re.search(
+            r"\b(\d+(?:\.\d+)?(?:\s*[–-]\s*\d+(?:\.\d+)?)?\s*(x|%|percent|gb|mb|tokens?|requests?)|for example|e\.g\.)\b",
+            statement,
+        )
+    )
+    return (best_overlap >= 0.18 or best_overlap_tokens >= 2) and quantifies_existing
+
+
+def _depends_on_descendant(claim_id: str, dependency_id: str, parent_by_claim: dict[str, str]) -> bool:
+    current = dependency_id
+    visited: set[str] = set()
+    while current and current not in visited:
+        if current == claim_id:
+            return True
+        visited.add(current)
+        current = parent_by_claim.get(current, "")
+    return False
+
+
+def _is_top_level_method(claim: RawClaim) -> bool:
+    return _method_abstraction_level(claim) in {"primitive", "system_realization"}
 
 
 def _is_submechanism_method(claim: RawClaim) -> bool:
-    local_role = _method_local_role(claim)
-    if local_role in {ClaimLocalRole.mechanism, ClaimLocalRole.implementation_detail}:
-        return True
-    if local_role == ClaimLocalRole.top_level:
-        return False
-    return _is_low_level_method(claim)
+    return _method_abstraction_level(claim) == "submechanism"
 
 
 def _classify_result_scope(claim: RawClaim) -> str:
@@ -475,8 +699,18 @@ def _classify_result_scope(claim: RawClaim) -> str:
 
     if _MULTIPLIER_RESULT_RE.search(statement):
         top_level_score += 2
+    has_baseline_comparison = bool(_TOP_LINE_BASELINE_RE.search(statement))
     if " vs " in f" {statement} " or " versus " in f" {statement} ":
         top_level_score += 1
+    if has_baseline_comparison:
+        top_level_score += 2
+    if _TOP_LINE_METRIC_RE.search(statement) and (
+        has_baseline_comparison
+        or "end-to-end" in statement
+        or "overall" in statement
+        or "request rate" in statement
+    ):
+        top_level_score += 2
 
     if top_level_score >= submechanism_score + 2 and top_level_score > 0:
         return "top_level"
@@ -495,9 +729,13 @@ def _best_method_parent(
 
     result_scope = _classify_result_scope(claim)
     if result_scope == "top_level":
-        top_level_methods = [method for method in candidate_methods if _is_top_level_method(method)]
-        if top_level_methods:
-            candidate_methods = top_level_methods
+        system_methods = [method for method in candidate_methods if _is_system_realization_method(method)]
+        if system_methods:
+            candidate_methods = system_methods
+        else:
+            top_level_methods = [method for method in candidate_methods if _is_top_level_method(method)]
+            if top_level_methods:
+                candidate_methods = top_level_methods
     elif result_scope == "submechanism":
         submechanism_methods = [method for method in candidate_methods if _is_submechanism_method(method)]
         if submechanism_methods:
@@ -1121,6 +1359,25 @@ def _build_tree_nodes(
     ]
     claim_by_id = {claim_id: claim_by_id[claim_id] for claim_id in claim_order}
 
+    mistyped_method_ids = {
+        claim_id
+        for claim_id in claim_order
+        if claim_by_id[claim_id].claim_type == ClaimType.method
+        and _is_observational_method_statement(claim_by_id[claim_id])
+    }
+    safe_demote_method_ids = {
+        claim_id
+        for claim_id in mistyped_method_ids
+        if claim_id not in facets_by_id
+        and (
+            claim_by_id[claim_id].structural_hints is None
+            or claim_by_id[claim_id].structural_hints.local_role != ClaimLocalRole.top_level
+        )
+    }
+    for claim_id in safe_demote_method_ids:
+        claim_by_id[claim_id] = claim_by_id[claim_id].model_copy(update={"claim_type": ClaimType.context})
+    non_parentable_method_ids = mistyped_method_ids - safe_demote_method_ids
+
     valid_ids = set(claim_by_id)
     assignment_by_id: dict[str, TreeNodeAssignment] = {}
     for assignment in assignments:
@@ -1156,6 +1413,10 @@ def _build_tree_nodes(
     context_claims = [claim_by_id[claim_id] for claim_id in context_ids]
     method_ids = [claim_id for claim_id in claim_order if claim_by_id[claim_id].claim_type == ClaimType.method]
     method_claims = [claim_by_id[claim_id] for claim_id in method_ids]
+    parentable_method_claims = [
+        method_claim for method_claim in method_claims if method_claim.claim_id not in non_parentable_method_ids
+    ]
+    parentable_method_ids = [method_claim.claim_id for method_claim in parentable_method_claims]
     result_ids = [claim_id for claim_id in claim_order if claim_by_id[claim_id].claim_type == ClaimType.result]
 
     # Enforce structural grammar on provided parent assignments.
@@ -1164,6 +1425,12 @@ def _build_tree_nodes(
         parent_claim = claim_by_id.get(parent_id)
         if parent_claim is None:
             del parent_by_claim[child_id]
+            continue
+
+        if parent_id in non_parentable_method_ids:
+            del parent_by_claim[child_id]
+            if depends_by_claim.get(child_id) == [parent_id]:
+                depends_by_claim[child_id] = []
             continue
 
         allowed_parent_types = _ALLOWED_PARENT_TYPES.get(child_claim.claim_type, set())
@@ -1186,7 +1453,7 @@ def _build_tree_nodes(
         hinted_parent = _hinted_parent_candidate(
             claim,
             claim_by_id=claim_by_id,
-            method_claims=method_claims,
+            method_claims=parentable_method_claims,
             context_claims=context_claims,
         )
         if hinted_parent is not None and not _would_create_parent_cycle(claim_id, hinted_parent, parent_by_claim):
@@ -1199,22 +1466,22 @@ def _build_tree_nodes(
                 best_context_id, context_score = _best_context_parent(claim, context_claims)
                 fallback_parent = best_context_id if best_context_id is not None and context_score > 0 else context_ids[0]
         elif claim.claim_type == ClaimType.result:
-            if method_ids:
-                best_method_id, score = _best_method_parent(claim, method_claims)
-                fallback_parent = best_method_id if best_method_id is not None and score > 0 else method_ids[0]
+            if parentable_method_ids:
+                best_method_id, score = _best_method_parent(claim, parentable_method_claims)
+                fallback_parent = best_method_id if best_method_id is not None and score > 0 else parentable_method_ids[0]
             elif context_ids:
                 fallback_parent = context_ids[0]
         elif claim.claim_type == ClaimType.assumption:
-            if method_ids:
-                best_method_id, score = _best_method_parent(claim, method_claims)
-                fallback_parent = best_method_id if best_method_id is not None and score > 0 else method_ids[0]
+            if parentable_method_ids:
+                best_method_id, score = _best_method_parent(claim, parentable_method_claims)
+                fallback_parent = best_method_id if best_method_id is not None and score > 0 else parentable_method_ids[0]
             elif result_ids:
                 fallback_parent = result_ids[0]
             elif context_ids:
                 fallback_parent = context_ids[0]
         elif claim.claim_type == ClaimType.negative:
-            if method_ids:
-                best_method_id, score = _best_method_parent(claim, method_claims)
+            if parentable_method_ids:
+                best_method_id, score = _best_method_parent(claim, parentable_method_claims)
                 if best_method_id is not None and score > 0:
                     fallback_parent = best_method_id
             if fallback_parent is None and context_claims:
@@ -1240,18 +1507,66 @@ def _build_tree_nodes(
             parent_by_claim[claim_id] = umbrella
             depends_by_claim[claim_id] = [umbrella]
 
+    # Reattach clearly derivative context roots under core context claims.
+    root_context_ids = [claim_id for claim_id in context_ids if claim_id not in parent_by_claim]
+    core_context_ids = [
+        claim_id
+        for claim_id in root_context_ids
+        if _context_problem_signal_count(claim_by_id[claim_id]) > 0
+    ]
+    if not core_context_ids and root_context_ids:
+        core_context_ids = [root_context_ids[0]]
+    core_context_claims = [claim_by_id[claim_id] for claim_id in core_context_ids]
+    for claim_id in root_context_ids:
+        if claim_id in core_context_ids:
+            continue
+        claim = claim_by_id[claim_id]
+        if not _is_derivative_context_claim(claim, core_context_claims):
+            continue
+        best_core_id, score = _best_context_parent(claim, core_context_claims)
+        if best_core_id is None:
+            continue
+        if score <= 0:
+            continue
+        if _would_create_parent_cycle(claim_id, best_core_id, parent_by_claim):
+            continue
+        parent_by_claim[claim_id] = best_core_id
+        depends_by_claim[claim_id] = [best_core_id]
+
     child_count: dict[str, int] = {}
     for parent_id in parent_by_claim.values():
         child_count[parent_id] = child_count.get(parent_id, 0) + 1
 
+    # Mistyped observational method nodes should not parent other claims.
+    for claim_id in non_parentable_method_ids:
+        if claim_id not in claim_by_id:
+            continue
+        current_parent_id = parent_by_claim.get(claim_id)
+        current_parent_claim = claim_by_id.get(current_parent_id) if current_parent_id else None
+        if current_parent_claim is not None and current_parent_claim.claim_type == ClaimType.context:
+            continue
+        if not context_claims:
+            continue
+        best_context_id, context_score = _best_context_parent(claim_by_id[claim_id], context_claims)
+        fallback_context = best_context_id if best_context_id is not None and context_score > 0 else context_ids[0]
+        if _would_create_parent_cycle(claim_id, fallback_context, parent_by_claim):
+            continue
+        if current_parent_id:
+            child_count[current_parent_id] = max(0, child_count.get(current_parent_id, 1) - 1)
+        parent_by_claim[claim_id] = fallback_context
+        child_count[fallback_context] = child_count.get(fallback_context, 0) + 1
+        depends_by_claim[claim_id] = [fallback_context]
+
     # Low-level implementation claims should prefer method parents over broad context roots.
     for claim_id in method_ids:
-        if len(method_claims) <= 1:
+        if claim_id in non_parentable_method_ids:
+            continue
+        if len(parentable_method_claims) <= 1:
             break
 
         claim = claim_by_id[claim_id]
         current_parent = parent_by_claim.get(claim_id)
-        best_method_id, best_score = _best_method_parent(claim, method_claims)
+        best_method_id, best_score = _best_method_parent(claim, parentable_method_claims)
         hints = claim.structural_hints
         hinted_parent = hints.elaborates_seed_id if hints is not None else None
         hint_requests_method_parent = (
@@ -1288,16 +1603,103 @@ def _build_tree_nodes(
         parent_by_claim[claim_id] = best_method_id
         child_count[best_method_id] = child_count.get(best_method_id, 0) + 1
 
+    # Enforce method abstraction ordering constraints.
+    for claim_id in method_ids:
+        if claim_id in non_parentable_method_ids:
+            continue
+        if claim_id not in claim_by_id:
+            continue
+
+        claim = claim_by_id[claim_id]
+        child_level = _method_abstraction_level(claim)
+        current_parent_id = parent_by_claim.get(claim_id)
+        current_parent_claim = claim_by_id.get(current_parent_id) if current_parent_id else None
+
+        # Submechanisms should attach beneath method parents whenever possible.
+        if (
+            child_level == "submechanism"
+            and (
+                current_parent_claim is None
+                or current_parent_claim.claim_type != ClaimType.method
+            )
+            and len(parentable_method_claims) > 1
+        ):
+            preferred_parents = [
+                candidate
+                for candidate in parentable_method_claims
+                if candidate.claim_id != claim_id and _method_abstraction_level(candidate) in {"primitive", "system_realization"}
+            ]
+            if not preferred_parents:
+                preferred_parents = [
+                    candidate
+                    for candidate in parentable_method_claims
+                    if candidate.claim_id != claim_id
+                ]
+            if preferred_parents:
+                best_parent_id, _ = _best_method_parent(claim, preferred_parents)
+                if best_parent_id is not None and not _would_create_parent_cycle(claim_id, best_parent_id, parent_by_claim):
+                    if current_parent_id:
+                        child_count[current_parent_id] = max(0, child_count.get(current_parent_id, 1) - 1)
+                    parent_by_claim[claim_id] = best_parent_id
+                    child_count[best_parent_id] = child_count.get(best_parent_id, 0) + 1
+                    current_parent_id = best_parent_id
+                    current_parent_claim = claim_by_id.get(best_parent_id)
+
+        if current_parent_claim is None or current_parent_claim.claim_type != ClaimType.method:
+            continue
+
+        parent_level = _method_abstraction_level(current_parent_claim)
+        violates = False
+        if child_level == "primitive" and parent_level in {"system_realization", "submechanism"}:
+            violates = True
+        elif child_level == "system_realization":
+            if parent_level == "submechanism":
+                violates = True
+            elif parent_level == "primitive" and not _has_explicit_instantiation_evidence(claim, current_parent_claim):
+                violates = True
+        elif child_level == "submechanism":
+            # Allowed under primitive/system/submechanism; no special-case.
+            violates = False
+        if parent_level == "submechanism" and child_level in {"primitive", "system_realization"}:
+            violates = True
+
+        if not violates:
+            continue
+
+        replacement_parent: str | None = None
+        if child_level == "submechanism" and parentable_method_claims:
+            preferred_parents = [
+                candidate
+                for candidate in parentable_method_claims
+                if candidate.claim_id != claim_id and _method_abstraction_level(candidate) in {"primitive", "system_realization"}
+            ]
+            if preferred_parents:
+                replacement_parent, _ = _best_method_parent(claim, preferred_parents)
+        if replacement_parent is None and context_claims:
+            best_context_id, context_score = _best_context_parent(claim, context_claims)
+            if best_context_id is not None and context_score > 0:
+                replacement_parent = best_context_id
+            elif context_ids:
+                replacement_parent = context_ids[0]
+        if replacement_parent is None:
+            continue
+        if _would_create_parent_cycle(claim_id, replacement_parent, parent_by_claim):
+            continue
+
+        child_count[current_parent_id] = max(0, child_count.get(current_parent_id, 1) - 1)
+        parent_by_claim[claim_id] = replacement_parent
+        child_count[replacement_parent] = child_count.get(replacement_parent, 0) + 1
+
     # Reattach results/assumptions/negatives to the most specific method when warranted.
     for claim_id in claim_order:
         claim = claim_by_id[claim_id]
         if claim.claim_type not in {ClaimType.result, ClaimType.assumption, ClaimType.negative}:
             continue
-        if not method_claims:
+        if not parentable_method_claims:
             continue
 
         current_parent = parent_by_claim.get(claim_id)
-        best_method_id, best_score = _best_method_parent(claim, method_claims)
+        best_method_id, best_score = _best_method_parent(claim, parentable_method_claims)
         if best_method_id is None:
             continue
 
@@ -1318,13 +1720,13 @@ def _build_tree_nodes(
             continue
 
         current_score = _method_affinity_score(claim, current_parent_claim)
-        overloaded_parent = child_count.get(current_parent, 0) >= 8
+        overloaded_parent = child_count.get(current_parent, 0) >= 4
         better_specific_match = best_score >= current_score + 3
         result_scope = _classify_result_scope(claim)
         scope_prefers_best = (
             result_scope == "top_level"
-            and _is_top_level_method(claim_by_id[best_method_id])
-            and not _is_top_level_method(current_parent_claim)
+            and _is_system_realization_method(claim_by_id[best_method_id])
+            and not _is_system_realization_method(current_parent_claim)
         )
         should_reattach = best_method_id != current_parent and (
             scope_prefers_best or
@@ -1337,6 +1739,24 @@ def _build_tree_nodes(
         child_count[current_parent] = max(0, child_count.get(current_parent, 1) - 1)
         parent_by_claim[claim_id] = best_method_id
         child_count[best_method_id] = child_count.get(best_method_id, 0) + 1
+
+    # Sanitize depends_on edges that contradict the structural tree.
+    for claim_id in claim_order:
+        dependencies = depends_by_claim.get(claim_id, [])
+        if not dependencies:
+            continue
+        cleaned: list[str] = []
+        for dependency_id in dependencies:
+            if dependency_id == claim_id:
+                continue
+            if dependency_id not in claim_by_id:
+                continue
+            if _depends_on_descendant(claim_id, dependency_id, parent_by_claim):
+                continue
+            if dependency_id in cleaned:
+                continue
+            cleaned.append(dependency_id)
+        depends_by_claim[claim_id] = cleaned
 
     for claim_id in claim_order:
         claim = claim_by_id[claim_id]
