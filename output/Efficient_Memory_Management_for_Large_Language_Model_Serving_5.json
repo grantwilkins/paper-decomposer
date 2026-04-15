@@ -1,0 +1,2338 @@
+{
+  "metadata": {
+    "title": "Efficient Memory Management for Large Language Model Serving with PagedAttention",
+    "authors": [
+      "Woosuk Kwon",
+      "Zhuohan Li",
+      "Siyuan Zhuang",
+      "Ying Sheng",
+      "Lianmin Zheng",
+      "Cody Hao Yu",
+      "Joseph E. Gonzalez",
+      "Hao Zhang",
+      "Ion Stoica"
+    ],
+    "venue": null,
+    "year": null,
+    "doi": null
+  },
+  "one_liner": {
+    "achieved": "near-zero KV cache waste and flexible sharing across requests",
+    "via": "PagedAttention algorithm and vLLM serving system with logical-to-physical block mapping",
+    "because": "virtual memory paging principles eliminate fragmentation and enable dynamic memory allocation for variable-length sequences"
+  },
+  "claim_tree": [
+    {
+      "claim_id": "C1",
+      "claim_type": "context",
+      "statement": "Existing LLM serving systems waste KV cache memory due to fragmentation and redundant duplication, limiting batch size.",
+      "evidence": [],
+      "facets": null,
+      "children": [
+        {
+          "claim_id": "C2",
+          "claim_type": "context",
+          "statement": "The KV Cache size grows quickly with the number of requests; for a 13B OPT model, a single token requires 800 KB, and a full 2048‑token request can consume up to 1.6 GB of GPU memory.",
+          "evidence": [],
+          "facets": null,
+          "children": [],
+          "depends_on": [
+            "C1"
+          ],
+          "rejected_what": null,
+          "rejected_why": null
+        },
+        {
+          "claim_id": "C3",
+          "claim_type": "context",
+          "statement": "Complex decoding algorithms, such as random sampling and beam search, require varying KV cache sharing strategies; for example, the prompt part can be shared to minimize memory usage, while the autoregressive generation phase must keep KV caches unshared.",
+          "evidence": [],
+          "facets": null,
+          "children": [],
+          "depends_on": [
+            "C1"
+          ],
+          "rejected_what": null,
+          "rejected_why": null
+        },
+        {
+          "claim_id": "C4",
+          "claim_type": "context",
+          "statement": "Requests exhibit variability in input and output lengths, requiring the memory management system to accommodate a wide range of prompt lengths and to make scheduling decisions such as deleting or swapping out KV caches.",
+          "evidence": [],
+          "facets": null,
+          "children": [],
+          "depends_on": [
+            "C1"
+          ],
+          "rejected_what": null,
+          "rejected_why": null
+        },
+        {
+          "claim_id": "M1",
+          "claim_type": "method",
+          "statement": "PagedAttention, an attention algorithm inspired by virtual memory paging, is proposed.",
+          "evidence": [],
+          "facets": {
+            "claim": {
+              "claim_id": "M1",
+              "claim_type": "method",
+              "statement": "PagedAttention, an attention algorithm inspired by virtual memory paging, is proposed.",
+              "source_section": "abstract",
+              "evidence": [],
+              "entity_names": [],
+              "rejected_what": null,
+              "rejected_why": null
+            },
+            "universal_facets": {
+              "intervention_types": [
+                "algorithm"
+              ],
+              "scope": "module",
+              "improves_or_replaces": "state-of-the-art LLM serving systems such as FasterTransformer and Orca",
+              "core_tradeoff": "memory usage vs. batch size",
+              "grounding": "empirical_demo",
+              "analogy_source": "virtual memory paging"
+            },
+            "systems_facets": null,
+            "architecture_facets": null,
+            "objective_facets": null,
+            "algorithm_facets": {
+              "g1": "UNSPECIFIED",
+              "g2": "KV cache allocation in attention",
+              "g3": "UNSPECIFIED",
+              "g4": "UNSPECIFIED",
+              "g5": "key-value cache memory"
+            },
+            "theory_facets": null,
+            "representation_facets": null,
+            "evaluation_facets": null,
+            "pipeline_facets": null
+          },
+          "children": [
+            {
+              "claim_id": "M34",
+              "claim_type": "method",
+              "statement": "PagedAttention uses a fused GPU kernel that reads KV cache blocks according to the block table and computes attention on the fly, assigning one warp per block to ensure coalesced memory access and supporting variable sequence lengths within a batch.",
+              "evidence": [],
+              "facets": {
+                "claim": {
+                  "claim_id": "M34",
+                  "claim_type": "method",
+                  "statement": "PagedAttention uses a fused GPU kernel that reads KV cache blocks according to the block table and computes attention on the fly, assigning one warp per block to ensure coalesced memory access and supporting variable sequence lengths within a batch.",
+                  "source_section": "5.1 Kernel-level Optimization",
+                  "evidence": [],
+                  "entity_names": [
+                    "Fused block read and attention kernel",
+                    "block table",
+                    "warp",
+                    "variable sequence lengths"
+                  ],
+                  "rejected_what": null,
+                  "rejected_why": null
+                },
+                "universal_facets": {
+                  "intervention_types": [
+                    "systems"
+                  ],
+                  "scope": "module",
+                  "improves_or_replaces": "existing non-fused GPU kernels",
+                  "core_tradeoff": "UNSPECIFIED",
+                  "grounding": "formal_only",
+                  "analogy_source": null
+                },
+                "systems_facets": {
+                  "s1_resource": "GPU memory",
+                  "s2_alloc_unit": "KV block",
+                  "s3_stack_layer": "runtime",
+                  "s4_mapping": "KV cache block -> GPU memory block via block table",
+                  "s5_policy": "Assign one warp per KV block",
+                  "s6_hw_assumption": "UNSPECIFIED"
+                },
+                "architecture_facets": null,
+                "objective_facets": null,
+                "algorithm_facets": null,
+                "theory_facets": null,
+                "representation_facets": null,
+                "evaluation_facets": null,
+                "pipeline_facets": null
+              },
+              "children": [
+                {
+                  "claim_id": "R21",
+                  "claim_type": "result",
+                  "statement": "Block size 16 is large enough to efficiently utilize the GPU and small enough to avoid significant internal fragmentation in most workloads.",
+                  "evidence": [],
+                  "facets": null,
+                  "children": [],
+                  "depends_on": [
+                    "M34"
+                  ],
+                  "rejected_what": null,
+                  "rejected_why": null
+                }
+              ],
+              "depends_on": [
+                "M1"
+              ],
+              "rejected_what": null,
+              "rejected_why": null
+            },
+            {
+              "claim_id": "M2",
+              "claim_type": "method",
+              "statement": "vLLM, an LLM serving system built on PagedAttention, achieves near‑zero KV cache waste and flexible sharing within and across requests.",
+              "evidence": [],
+              "facets": {
+                "claim": {
+                  "claim_id": "M2",
+                  "claim_type": "method",
+                  "statement": "vLLM, an LLM serving system built on PagedAttention, achieves near‑zero KV cache waste and flexible sharing within and across requests.",
+                  "source_section": "abstract",
+                  "evidence": [],
+                  "entity_names": [],
+                  "rejected_what": null,
+                  "rejected_why": null
+                },
+                "universal_facets": {
+                  "intervention_types": [
+                    "algorithm",
+                    "systems"
+                  ],
+                  "scope": "system",
+                  "improves_or_replaces": "state-of-the-art LLM serving systems (FasterTransformer, Orca)",
+                  "core_tradeoff": "KV cache memory usage vs batch throughput",
+                  "grounding": "empirical_demo",
+                  "analogy_source": null
+                },
+                "systems_facets": null,
+                "architecture_facets": null,
+                "objective_facets": null,
+                "algorithm_facets": {
+                  "g1": "UNSPECIFIED",
+                  "g2": "Key-value cache allocation and sharing",
+                  "g3": "Near-zero KV cache waste and flexible sharing across requests",
+                  "g4": "Batch processing of requests",
+                  "g5": "Key-value cache state across requests"
+                },
+                "theory_facets": null,
+                "representation_facets": null,
+                "evaluation_facets": null,
+                "pipeline_facets": null
+              },
+              "children": [
+                {
+                  "claim_id": "M19",
+                  "claim_type": "method",
+                  "statement": "vLLM allows logical blocks of different requests to be mapped to non-contiguous physical blocks, enabling efficient utilization of GPU memory across requests.",
+                  "evidence": [],
+                  "facets": {
+                    "claim": {
+                      "claim_id": "M19",
+                      "claim_type": "method",
+                      "statement": "vLLM allows logical blocks of different requests to be mapped to non-contiguous physical blocks, enabling efficient utilization of GPU memory across requests.",
+                      "source_section": "4.3 Decoding with PagedAttention and vLLM",
+                      "evidence": [],
+                      "entity_names": [
+                        "vLLM",
+                        "logical KV blocks",
+                        "physical KV blocks"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    "universal_facets": {
+                      "intervention_types": [
+                        "systems"
+                      ],
+                      "scope": "system",
+                      "improves_or_replaces": "GPU memory utilization across requests",
+                      "core_tradeoff": "UNSPECIFIED",
+                      "grounding": "empirical_demo",
+                      "analogy_source": null
+                    },
+                    "systems_facets": {
+                      "s1_resource": "GPU memory",
+                      "s2_alloc_unit": "KV block",
+                      "s3_stack_layer": "runtime",
+                      "s4_mapping": "logical KV block -> physical KV block via block table",
+                      "s5_policy": "UNSPECIFIED",
+                      "s6_hw_assumption": "GPU workers with block engine"
+                    },
+                    "architecture_facets": null,
+                    "objective_facets": null,
+                    "algorithm_facets": null,
+                    "theory_facets": null,
+                    "representation_facets": null,
+                    "evaluation_facets": null,
+                    "pipeline_facets": null
+                  },
+                  "children": [
+                    {
+                      "claim_id": "M16",
+                      "claim_type": "method",
+                      "statement": "vLLM maps logical KV blocks to physical KV blocks, storing the KV cache of tokens in logical blocks and allocating new physical blocks as needed during autoregressive decoding.",
+                      "evidence": [],
+                      "facets": {
+                        "claim": {
+                          "claim_id": "M16",
+                          "claim_type": "method",
+                          "statement": "vLLM maps logical KV blocks to physical KV blocks, storing the KV cache of tokens in logical blocks and allocating new physical blocks as needed during autoregressive decoding.",
+                          "source_section": "4.3 Decoding with PagedAttention and vLLM",
+                          "evidence": [],
+                          "entity_names": [
+                            "vLLM",
+                            "logical KV blocks",
+                            "physical KV blocks",
+                            "block table"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        "universal_facets": {
+                          "intervention_types": [
+                            "systems"
+                          ],
+                          "scope": "system",
+                          "improves_or_replaces": "pre-allocating KV cache for maximum sequence length",
+                          "core_tradeoff": "larger block size boosts parallelism but increases fragmentation",
+                          "grounding": "empirical_demo",
+                          "analogy_source": null
+                        },
+                        "systems_facets": {
+                          "s1_resource": "GPU memory",
+                          "s2_alloc_unit": "KV block",
+                          "s3_stack_layer": "runtime",
+                          "s4_mapping": "logical KV block -> physical KV block via block table",
+                          "s5_policy": "Allocate new physical block when logical block is full during decoding",
+                          "s6_hw_assumption": "GPU workers with block engine"
+                        },
+                        "architecture_facets": null,
+                        "objective_facets": null,
+                        "algorithm_facets": null,
+                        "theory_facets": null,
+                        "representation_facets": null,
+                        "evaluation_facets": null,
+                        "pipeline_facets": null
+                      },
+                      "children": [
+                        {
+                          "claim_id": "M18",
+                          "claim_type": "method",
+                          "statement": "Storing multiple tokens within a KV block (block size > 1) enables the PagedAttention kernel to process the KV cache across more positions in parallel, increasing hardware utilization and reducing latency.",
+                          "evidence": [],
+                          "facets": {
+                            "claim": {
+                              "claim_id": "M18",
+                              "claim_type": "method",
+                              "statement": "Storing multiple tokens within a KV block (block size > 1) enables the PagedAttention kernel to process the KV cache across more positions in parallel, increasing hardware utilization and reducing latency.",
+                              "source_section": "4.3 Decoding with PagedAttention and vLLM",
+                              "evidence": [],
+                              "entity_names": [
+                                "PagedAttention",
+                                "block size"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            },
+                            "universal_facets": {
+                              "intervention_types": [
+                                "representation",
+                                "systems"
+                              ],
+                              "scope": "module",
+                              "improves_or_replaces": "PagedAttention kernel processing of KV cache",
+                              "core_tradeoff": "UNSPECIFIED",
+                              "grounding": "qualitative",
+                              "analogy_source": null
+                            },
+                            "systems_facets": null,
+                            "architecture_facets": null,
+                            "objective_facets": null,
+                            "algorithm_facets": null,
+                            "theory_facets": null,
+                            "representation_facets": {
+                              "p1": "Tokens of a language model sequence",
+                              "p2": "KV blocks storing multiple tokens",
+                              "p3": "Parallel processing of KV cache positions",
+                              "p4": "Grouping tokens into larger KV blocks"
+                            },
+                            "evaluation_facets": null,
+                            "pipeline_facets": null
+                          },
+                          "children": [
+                            {
+                              "claim_id": "R17",
+                              "claim_type": "result",
+                              "statement": "20–26% higher attention kernel latency compared to FasterTransformer.",
+                              "evidence": [],
+                              "facets": null,
+                              "children": [],
+                              "depends_on": [
+                                "M18"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            },
+                            {
+                              "claim_id": "R23",
+                              "claim_type": "result",
+                              "statement": "The overhead of recomputation remains constant across different block sizes.",
+                              "evidence": [],
+                              "facets": null,
+                              "children": [],
+                              "depends_on": [
+                                "M18"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            },
+                            {
+                              "claim_id": "R24",
+                              "claim_type": "result",
+                              "statement": "Recomputation is more efficient when the block size is small.",
+                              "evidence": [],
+                              "facets": null,
+                              "children": [],
+                              "depends_on": [
+                                "M18"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            },
+                            {
+                              "claim_id": "R25",
+                              "claim_type": "result",
+                              "statement": "Swapping is more efficient when the block size is large.",
+                              "evidence": [],
+                              "facets": null,
+                              "children": [],
+                              "depends_on": [
+                                "M18"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            }
+                          ],
+                          "depends_on": [
+                            "M2"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        {
+                          "claim_id": "M17",
+                          "claim_type": "method",
+                          "statement": "vLLM uses the PagedAttention kernel to access previous KV cache stored in logical blocks and to save newly generated KV cache into physical blocks.",
+                          "evidence": [],
+                          "facets": {
+                            "claim": {
+                              "claim_id": "M17",
+                              "claim_type": "method",
+                              "statement": "vLLM uses the PagedAttention kernel to access previous KV cache stored in logical blocks and to save newly generated KV cache into physical blocks.",
+                              "source_section": "4.3 Decoding with PagedAttention and vLLM",
+                              "evidence": [],
+                              "entity_names": [
+                                "vLLM",
+                                "PagedAttention kernel"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            },
+                            "universal_facets": {
+                              "intervention_types": [
+                                "algorithm",
+                                "systems"
+                              ],
+                              "scope": "system",
+                              "improves_or_replaces": "memory allocation for KV cache",
+                              "core_tradeoff": "block size vs memory fragmentation",
+                              "grounding": "empirical_demo",
+                              "analogy_source": null
+                            },
+                            "systems_facets": null,
+                            "architecture_facets": null,
+                            "objective_facets": null,
+                            "algorithm_facets": {
+                              "g1": "UNSPECIFIED",
+                              "g2": "PagedAttention kernel",
+                              "g3": "UNSPECIFIED",
+                              "g4": "UNSPECIFIED",
+                              "g5": "KV cache in logical and physical blocks"
+                            },
+                            "theory_facets": null,
+                            "representation_facets": null,
+                            "evaluation_facets": null,
+                            "pipeline_facets": null
+                          },
+                          "children": [],
+                          "depends_on": [
+                            "M2"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        {
+                          "claim_id": "A2",
+                          "claim_type": "assumption",
+                          "statement": "vLLM dynamically assigns new physical blocks to logical blocks as more tokens are generated, filling blocks left to right and allocating a new physical block only when all previous blocks are full, thereby limiting memory waste within a request to one block.",
+                          "evidence": [],
+                          "facets": null,
+                          "children": [],
+                          "depends_on": [
+                            "M16"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        }
+                      ],
+                      "depends_on": [
+                        "M2"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    {
+                      "claim_id": "R11",
+                      "claim_type": "result",
+                      "statement": "For OPT-13B on the ShareGPT dataset, vLLM processes 2.2× more requests at the same time than Orca (Oracle) and 4.3× more requests than Orca (Max).",
+                      "evidence": [],
+                      "facets": null,
+                      "children": [],
+                      "depends_on": [
+                        "M19"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    }
+                  ],
+                  "depends_on": [
+                    "M2"
+                  ],
+                  "rejected_what": null,
+                  "rejected_why": null
+                },
+                {
+                  "claim_id": "M20",
+                  "claim_type": "method",
+                  "statement": "Once a request finishes generation, its KV blocks can be freed and reused to store KV cache of other requests.",
+                  "evidence": [],
+                  "facets": {
+                    "claim": {
+                      "claim_id": "M20",
+                      "claim_type": "method",
+                      "statement": "Once a request finishes generation, its KV blocks can be freed and reused to store KV cache of other requests.",
+                      "source_section": "4.3 Decoding with PagedAttention and vLLM",
+                      "evidence": [],
+                      "entity_names": [
+                        "vLLM",
+                        "KV cache"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    "universal_facets": {
+                      "intervention_types": [
+                        "systems"
+                      ],
+                      "scope": "system",
+                      "improves_or_replaces": "throughput",
+                      "core_tradeoff": "block size vs memory fragmentation",
+                      "grounding": "empirical_demo",
+                      "analogy_source": null
+                    },
+                    "systems_facets": {
+                      "s1_resource": "GPU memory for KV cache",
+                      "s2_alloc_unit": "KV block",
+                      "s3_stack_layer": "application_level",
+                      "s4_mapping": "logical KV block -> physical KV block via block table",
+                      "s5_policy": "UNSPECIFIED",
+                      "s6_hw_assumption": "GPU"
+                    },
+                    "architecture_facets": null,
+                    "objective_facets": null,
+                    "algorithm_facets": null,
+                    "theory_facets": null,
+                    "representation_facets": null,
+                    "evaluation_facets": null,
+                    "pipeline_facets": null
+                  },
+                  "children": [
+                    {
+                      "claim_id": "M15",
+                      "claim_type": "method",
+                      "statement": "vLLM does not reserve memory for the maximum possible generated sequence length initially; instead, it reserves only the necessary KV blocks to accommodate the KV cache generated during prompt computation.",
+                      "evidence": [],
+                      "facets": {
+                        "claim": {
+                          "claim_id": "M15",
+                          "claim_type": "method",
+                          "statement": "vLLM does not reserve memory for the maximum possible generated sequence length initially; instead, it reserves only the necessary KV blocks to accommodate the KV cache generated during prompt computation.",
+                          "source_section": "4.3 Decoding with PagedAttention and vLLM",
+                          "evidence": [],
+                          "entity_names": [
+                            "vLLM",
+                            "KV cache"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        "universal_facets": {
+                          "intervention_types": [
+                            "systems"
+                          ],
+                          "scope": "system",
+                          "improves_or_replaces": "pre-reserving maximum sequence length memory",
+                          "core_tradeoff": "UNSPECIFIED",
+                          "grounding": "qualitative",
+                          "analogy_source": null
+                        },
+                        "systems_facets": {
+                          "s1_resource": "GPU memory",
+                          "s2_alloc_unit": "KV block",
+                          "s3_stack_layer": "runtime",
+                          "s4_mapping": "logical KV block -> physical KV block via block table",
+                          "s5_policy": "allocate new physical block when logical block full, left-to-right allocation",
+                          "s6_hw_assumption": "GPU with memory and PagedAttention kernel support"
+                        },
+                        "architecture_facets": null,
+                        "objective_facets": null,
+                        "algorithm_facets": null,
+                        "theory_facets": null,
+                        "representation_facets": null,
+                        "evaluation_facets": null,
+                        "pipeline_facets": null
+                      },
+                      "children": [
+                        {
+                          "claim_id": "N2",
+                          "claim_type": "negative",
+                          "statement": "Compaction is impractical in performance-sensitive LLM serving systems due to the massive KV cache.",
+                          "evidence": [],
+                          "facets": null,
+                          "children": [],
+                          "depends_on": [
+                            "M15"
+                          ],
+                          "rejected_what": "compaction",
+                          "rejected_why": "impractical due to massive KV cache"
+                        },
+                        {
+                          "claim_id": "N3",
+                          "claim_type": "negative",
+                          "statement": "Pre-allocated chunk space for each request prevents memory sharing specific to decoding algorithms in existing memory management systems.",
+                          "evidence": [],
+                          "facets": null,
+                          "children": [],
+                          "depends_on": [
+                            "M15"
+                          ],
+                          "rejected_what": "pre-allocation of KV cache",
+                          "rejected_why": "prevents memory sharing specific to decoding algorithms"
+                        },
+                        {
+                          "claim_id": "A3",
+                          "claim_type": "assumption",
+                          "statement": "Virtual memory and paging is effective for managing the KV cache in LLM serving because the workload requires dynamic memory allocation and is GPU memory bound.",
+                          "evidence": [],
+                          "facets": null,
+                          "children": [],
+                          "depends_on": [
+                            "M15"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        {
+                          "claim_id": "A5",
+                          "claim_type": "assumption",
+                          "statement": "The recomputation method to recover evicted blocks is not feasible in OS.",
+                          "evidence": [],
+                          "facets": null,
+                          "children": [],
+                          "depends_on": [
+                            "M15"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        }
+                      ],
+                      "depends_on": [
+                        "M2"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    }
+                  ],
+                  "depends_on": [
+                    "M2"
+                  ],
+                  "rejected_what": null,
+                  "rejected_why": null
+                },
+                {
+                  "claim_id": "M22",
+                  "claim_type": "method",
+                  "statement": "vLLM implements an all‑or‑nothing eviction policy that evicts either all or none of the blocks of a sequence, since all blocks of a sequence are accessed together.",
+                  "evidence": [],
+                  "facets": {
+                    "claim": {
+                      "claim_id": "M22",
+                      "claim_type": "method",
+                      "statement": "vLLM implements an all‑or‑nothing eviction policy that evicts either all or none of the blocks of a sequence, since all blocks of a sequence are accessed together.",
+                      "source_section": "4.5 Scheduling and Preemption",
+                      "evidence": [],
+                      "entity_names": [
+                        "vLLM",
+                        "all‑or‑nothing eviction policy"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    "universal_facets": {
+                      "intervention_types": [
+                        "systems"
+                      ],
+                      "scope": "system",
+                      "improves_or_replaces": "UNSPECIFIED",
+                      "core_tradeoff": "UNSPECIFIED",
+                      "grounding": "empirical_demo",
+                      "analogy_source": null
+                    },
+                    "systems_facets": {
+                      "s1_resource": "GPU memory (KV cache blocks)",
+                      "s2_alloc_unit": "KV block",
+                      "s3_stack_layer": "application_level",
+                      "s4_mapping": "sequence -> GPU KV cache blocks via all-or-nothing eviction",
+                      "s5_policy": "all-or-nothing eviction policy",
+                      "s6_hw_assumption": "GPU memory and CPU memory"
+                    },
+                    "architecture_facets": null,
+                    "objective_facets": null,
+                    "algorithm_facets": null,
+                    "theory_facets": null,
+                    "representation_facets": null,
+                    "evaluation_facets": null,
+                    "pipeline_facets": null
+                  },
+                  "children": [
+                    {
+                      "claim_id": "M21",
+                      "claim_type": "method",
+                      "statement": "vLLM uses a first‑come‑first‑serve scheduling policy for all requests and a preemption policy that serves the earliest arrived requests first while preempting the latest requests first, ensuring fairness and preventing starvation.",
+                      "evidence": [],
+                      "facets": {
+                        "claim": {
+                          "claim_id": "M21",
+                          "claim_type": "method",
+                          "statement": "vLLM uses a first‑come‑first‑serve scheduling policy for all requests and a preemption policy that serves the earliest arrived requests first while preempting the latest requests first, ensuring fairness and preventing starvation.",
+                          "source_section": "4.5 Scheduling and Preemption",
+                          "evidence": [],
+                          "entity_names": [
+                            "vLLM",
+                            "FCFS scheduling policy",
+                            "preemption policy"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        "universal_facets": {
+                          "intervention_types": [
+                            "systems"
+                          ],
+                          "scope": "system",
+                          "improves_or_replaces": "fairness and starvation prevention",
+                          "core_tradeoff": "UNSPECIFIED",
+                          "grounding": "qualitative",
+                          "analogy_source": null
+                        },
+                        "systems_facets": {
+                          "s1_resource": "GPU memory used for KV cache",
+                          "s2_alloc_unit": "KV block",
+                          "s3_stack_layer": "application_level",
+                          "s4_mapping": "Request -> GPU KV cache blocks via all-or-nothing eviction",
+                          "s5_policy": "First-come-first-serve scheduling with earliest-first preemption",
+                          "s6_hw_assumption": "GPU with memory and CPU RAM for swapping"
+                        },
+                        "architecture_facets": null,
+                        "objective_facets": null,
+                        "algorithm_facets": null,
+                        "theory_facets": null,
+                        "representation_facets": null,
+                        "evaluation_facets": null,
+                        "pipeline_facets": null
+                      },
+                      "children": [],
+                      "depends_on": [
+                        "M2"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    {
+                      "claim_id": "M23",
+                      "claim_type": "method",
+                      "statement": "vLLM gang‑schedules multiple sequences within a single request as a sequence group, preempting or rescheduling them together to preserve potential memory sharing across those sequences.",
+                      "evidence": [],
+                      "facets": {
+                        "claim": {
+                          "claim_id": "M23",
+                          "claim_type": "method",
+                          "statement": "vLLM gang‑schedules multiple sequences within a single request as a sequence group, preempting or rescheduling them together to preserve potential memory sharing across those sequences.",
+                          "source_section": "4.5 Scheduling and Preemption",
+                          "evidence": [],
+                          "entity_names": [
+                            "vLLM",
+                            "sequence group"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        "universal_facets": {
+                          "intervention_types": [
+                            "algorithm",
+                            "systems"
+                          ],
+                          "scope": "system",
+                          "improves_or_replaces": "memory sharing across sequences",
+                          "core_tradeoff": "UNSPECIFIED",
+                          "grounding": "qualitative",
+                          "analogy_source": null
+                        },
+                        "systems_facets": null,
+                        "architecture_facets": null,
+                        "objective_facets": null,
+                        "algorithm_facets": {
+                          "g1": "UNSPECIFIED",
+                          "g2": "Preemption and rescheduling of sequence groups",
+                          "g3": "UNSPECIFIED",
+                          "g4": "Gang scheduling of sequences",
+                          "g5": "KV cache blocks"
+                        },
+                        "theory_facets": null,
+                        "representation_facets": null,
+                        "evaluation_facets": null,
+                        "pipeline_facets": null
+                      },
+                      "children": [],
+                      "depends_on": [
+                        "M2"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    {
+                      "claim_id": "M24",
+                      "claim_type": "method",
+                      "statement": "vLLM implements a swapping mechanism that transfers evicted KV cache blocks to CPU RAM via a CPU block allocator, bounded by the GPU memory allocated for the KV cache, and pauses new requests until preempted sequences finish.",
+                      "evidence": [],
+                      "facets": {
+                        "claim": {
+                          "claim_id": "M24",
+                          "claim_type": "method",
+                          "statement": "vLLM implements a swapping mechanism that transfers evicted KV cache blocks to CPU RAM via a CPU block allocator, bounded by the GPU memory allocated for the KV cache, and pauses new requests until preempted sequences finish.",
+                          "source_section": "4.5 Scheduling and Preemption",
+                          "evidence": [],
+                          "entity_names": [
+                            "vLLM",
+                            "CPU block allocator",
+                            "GPU block allocator",
+                            "swapping mechanism"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        "universal_facets": {
+                          "intervention_types": [
+                            "systems"
+                          ],
+                          "scope": "system",
+                          "improves_or_replaces": "UNSPECIFIED",
+                          "core_tradeoff": "UNSPECIFIED",
+                          "grounding": "qualitative",
+                          "analogy_source": null
+                        },
+                        "systems_facets": {
+                          "s1_resource": "GPU memory (KV cache blocks)",
+                          "s2_alloc_unit": "KV cache block",
+                          "s3_stack_layer": "application_level",
+                          "s4_mapping": "evicted KV cache blocks -> CPU RAM blocks via CPU block allocator",
+                          "s5_policy": "All-or-nothing eviction of entire sequence blocks",
+                          "s6_hw_assumption": "GPU memory and CPU RAM with bandwidth between them"
+                        },
+                        "architecture_facets": null,
+                        "objective_facets": null,
+                        "algorithm_facets": null,
+                        "theory_facets": null,
+                        "representation_facets": null,
+                        "evaluation_facets": null,
+                        "pipeline_facets": null
+                      },
+                      "children": [
+                        {
+                          "claim_id": "R6",
+                          "claim_type": "result",
+                          "statement": "vLLM recomputes KV cache for preempted sequences upon rescheduling, leveraging concatenated prompts to reduce recomputation latency.",
+                          "evidence": [],
+                          "facets": null,
+                          "children": [],
+                          "depends_on": [
+                            "M24"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        {
+                          "claim_id": "R19",
+                          "claim_type": "result",
+                          "statement": "In the ShareGPT trace, block sizes from 16 to 128 tokens lead to the best performance.",
+                          "evidence": [],
+                          "facets": null,
+                          "children": [],
+                          "depends_on": [
+                            "M24"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        {
+                          "claim_id": "R22",
+                          "claim_type": "result",
+                          "statement": "Swapping incurs excessive overhead with small block sizes.",
+                          "evidence": [],
+                          "facets": null,
+                          "children": [],
+                          "depends_on": [
+                            "M24"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        {
+                          "claim_id": "R26",
+                          "claim_type": "result",
+                          "statement": "Recomputation overhead is never higher than 20% of swapping’s latency.",
+                          "evidence": [],
+                          "facets": null,
+                          "children": [],
+                          "depends_on": [
+                            "M24"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        {
+                          "claim_id": "R27",
+                          "claim_type": "result",
+                          "statement": "For medium block sizes from 16 to 64, the two methods exhibit comparable end-to-end performance.",
+                          "evidence": [],
+                          "facets": null,
+                          "children": [],
+                          "depends_on": [
+                            "M24"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        }
+                      ],
+                      "depends_on": [
+                        "M2"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    {
+                      "claim_id": "A4",
+                      "claim_type": "assumption",
+                      "statement": "vLLM’s all-or-nothing swap-out policy exploits the fact that processing a request requires all of its corresponding token states to be stored in GPU memory.",
+                      "evidence": [],
+                      "facets": null,
+                      "children": [],
+                      "depends_on": [
+                        "M22"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    }
+                  ],
+                  "depends_on": [
+                    "M2"
+                  ],
+                  "rejected_what": null,
+                  "rejected_why": null
+                },
+                {
+                  "claim_id": "M8",
+                  "claim_type": "method",
+                  "statement": "The system design of vLLM operates in a distributed setting, coordinating multiple GPU workers via the centralized scheduler.",
+                  "evidence": [],
+                  "facets": {
+                    "claim": {
+                      "claim_id": "M8",
+                      "claim_type": "method",
+                      "statement": "The system design of vLLM operates in a distributed setting, coordinating multiple GPU workers via the centralized scheduler.",
+                      "source_section": "4 Method",
+                      "evidence": [],
+                      "entity_names": [
+                        "vLLM",
+                        "centralized scheduler",
+                        "GPU workers"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    "universal_facets": {
+                      "intervention_types": [
+                        "systems"
+                      ],
+                      "scope": "system",
+                      "improves_or_replaces": "UNSPECIFIED",
+                      "core_tradeoff": "UNSPECIFIED",
+                      "grounding": "qualitative",
+                      "analogy_source": null
+                    },
+                    "systems_facets": {
+                      "s1_resource": "GPU memory (KV cache)",
+                      "s2_alloc_unit": "UNSPECIFIED",
+                      "s3_stack_layer": "application_level",
+                      "s4_mapping": "logical KV cache -> physical GPU memory via scheduler instructions",
+                      "s5_policy": "UNSPECIFIED",
+                      "s6_hw_assumption": "distributed GPU workers"
+                    },
+                    "architecture_facets": null,
+                    "objective_facets": null,
+                    "algorithm_facets": null,
+                    "theory_facets": null,
+                    "representation_facets": null,
+                    "evaluation_facets": null,
+                    "pipeline_facets": null
+                  },
+                  "children": [
+                    {
+                      "claim_id": "M5",
+                      "claim_type": "method",
+                      "statement": "The KV cache manager in vLLM manages the KV cache in a paged fashion, enabled by PagedAttention, by controlling physical KV cache memory on GPU workers through instructions from the centralized scheduler.",
+                      "evidence": [],
+                      "facets": {
+                        "claim": {
+                          "claim_id": "M5",
+                          "claim_type": "method",
+                          "statement": "The KV cache manager in vLLM manages the KV cache in a paged fashion, enabled by PagedAttention, by controlling physical KV cache memory on GPU workers through instructions from the centralized scheduler.",
+                          "source_section": "4 Method",
+                          "evidence": [],
+                          "entity_names": [
+                            "vLLM",
+                            "KV cache manager",
+                            "PagedAttention",
+                            "centralized scheduler"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        "universal_facets": {
+                          "intervention_types": [
+                            "systems"
+                          ],
+                          "scope": "system",
+                          "improves_or_replaces": "UNSPECIFIED",
+                          "core_tradeoff": "UNSPECIFIED",
+                          "grounding": "qualitative",
+                          "analogy_source": null
+                        },
+                        "systems_facets": {
+                          "s1_resource": "GPU memory",
+                          "s2_alloc_unit": "UNSPECIFIED",
+                          "s3_stack_layer": "application_level",
+                          "s4_mapping": "UNSPECIFIED",
+                          "s5_policy": "instructions from centralized scheduler",
+                          "s6_hw_assumption": "GPU workers"
+                        },
+                        "architecture_facets": null,
+                        "objective_facets": null,
+                        "algorithm_facets": null,
+                        "theory_facets": null,
+                        "representation_facets": null,
+                        "evaluation_facets": null,
+                        "pipeline_facets": null
+                      },
+                      "children": [
+                        {
+                          "claim_id": "M25",
+                          "claim_type": "method",
+                          "statement": "vLLM supports distributed execution of large language models by integrating Megatron-LM style tensor model parallelism with a single KV cache manager embedded in a centralized scheduler, enabling efficient memory sharing across GPUs.",
+                          "evidence": [],
+                          "facets": {
+                            "claim": {
+                              "claim_id": "M25",
+                              "claim_type": "method",
+                              "statement": "vLLM supports distributed execution of large language models by integrating Megatron-LM style tensor model parallelism with a single KV cache manager embedded in a centralized scheduler, enabling efficient memory sharing across GPUs.",
+                              "source_section": "4.6 Distributed Execution",
+                              "evidence": [],
+                              "entity_names": [
+                                "vLLM",
+                                "Megatron-LM style tensor model parallelism",
+                                "KV cache manager",
+                                "centralized scheduler"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            },
+                            "universal_facets": {
+                              "intervention_types": [
+                                "systems"
+                              ],
+                              "scope": "system",
+                              "improves_or_replaces": "distributed execution of large language models",
+                              "core_tradeoff": "UNSPECIFIED",
+                              "grounding": "qualitative",
+                              "analogy_source": null
+                            },
+                            "systems_facets": {
+                              "s1_resource": "GPU memory (KV cache)",
+                              "s2_alloc_unit": "KV cache block",
+                              "s3_stack_layer": "runtime",
+                              "s4_mapping": "logical block -> physical block via centralized scheduler",
+                              "s5_policy": "static mapping per decoding iteration",
+                              "s6_hw_assumption": "UNSPECIFIED"
+                            },
+                            "architecture_facets": null,
+                            "objective_facets": null,
+                            "algorithm_facets": null,
+                            "theory_facets": null,
+                            "representation_facets": null,
+                            "evaluation_facets": null,
+                            "pipeline_facets": null
+                          },
+                          "children": [
+                            {
+                              "claim_id": "M26",
+                              "claim_type": "method",
+                              "statement": "The single KV cache manager in vLLM shares a logical-to-physical block mapping across GPU workers, allowing each worker to store only the portion of the KV cache corresponding to its assigned attention heads.",
+                              "evidence": [],
+                              "facets": {
+                                "claim": {
+                                  "claim_id": "M26",
+                                  "claim_type": "method",
+                                  "statement": "The single KV cache manager in vLLM shares a logical-to-physical block mapping across GPU workers, allowing each worker to store only the portion of the KV cache corresponding to its assigned attention heads.",
+                                  "source_section": "4.6 Distributed Execution",
+                                  "evidence": [],
+                                  "entity_names": [
+                                    "KV cache manager",
+                                    "GPU workers",
+                                    "logical-to-physical block mapping"
+                                  ],
+                                  "rejected_what": null,
+                                  "rejected_why": null
+                                },
+                                "universal_facets": {
+                                  "intervention_types": [
+                                    "systems"
+                                  ],
+                                  "scope": "module",
+                                  "improves_or_replaces": "reduces per-GPU KV cache memory usage",
+                                  "core_tradeoff": "UNSPECIFIED",
+                                  "grounding": "empirical_demo",
+                                  "analogy_source": null
+                                },
+                                "systems_facets": {
+                                  "s1_resource": "GPU KV cache memory",
+                                  "s2_alloc_unit": "KV block",
+                                  "s3_stack_layer": "application_level",
+                                  "s4_mapping": "logical KV block -> physical KV block via shared mapping",
+                                  "s5_policy": "partition KV cache per attention head",
+                                  "s6_hw_assumption": "UNSPECIFIED"
+                                },
+                                "architecture_facets": null,
+                                "objective_facets": null,
+                                "algorithm_facets": null,
+                                "theory_facets": null,
+                                "representation_facets": null,
+                                "evaluation_facets": null,
+                                "pipeline_facets": null
+                              },
+                              "children": [],
+                              "depends_on": [
+                                "M25"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            }
+                          ],
+                          "depends_on": [
+                            "M8"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        {
+                          "claim_id": "M6",
+                          "claim_type": "method",
+                          "statement": "The design of vLLM facilitates effective memory management for various decoding methods, such as parallel sampling, beam search, and shared prompt generation.",
+                          "evidence": [],
+                          "facets": {
+                            "claim": {
+                              "claim_id": "M6",
+                              "claim_type": "method",
+                              "statement": "The design of vLLM facilitates effective memory management for various decoding methods, such as parallel sampling, beam search, and shared prompt generation.",
+                              "source_section": "4 Method",
+                              "evidence": [],
+                              "entity_names": [
+                                "vLLM",
+                                "parallel sampling",
+                                "beam search",
+                                "shared prompt"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            },
+                            "universal_facets": {
+                              "intervention_types": [
+                                "systems"
+                              ],
+                              "scope": "system",
+                              "improves_or_replaces": "UNSPECIFIED",
+                              "core_tradeoff": "UNSPECIFIED",
+                              "grounding": "empirical_demo",
+                              "analogy_source": null
+                            },
+                            "systems_facets": {
+                              "s1_resource": "GPU KV cache memory",
+                              "s2_alloc_unit": "UNSPECIFIED",
+                              "s3_stack_layer": "application_level",
+                              "s4_mapping": "KV cache -> GPU memory pages via PagedAttention and KV cache manager",
+                              "s5_policy": "UNSPECIFIED",
+                              "s6_hw_assumption": "distributed GPU workers"
+                            },
+                            "architecture_facets": null,
+                            "objective_facets": null,
+                            "algorithm_facets": null,
+                            "theory_facets": null,
+                            "representation_facets": null,
+                            "evaluation_facets": null,
+                            "pipeline_facets": null
+                          },
+                          "children": [
+                            {
+                              "claim_id": "R13",
+                              "claim_type": "result",
+                              "statement": "Memory saving on parallel sampling ranges from 6.1% to 9.8% and on beam search ranges from 37.6% to 55.2% on the Alpaca dataset.",
+                              "evidence": [],
+                              "facets": null,
+                              "children": [],
+                              "depends_on": [
+                                "M6"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            },
+                            {
+                              "claim_id": "R14",
+                              "claim_type": "result",
+                              "statement": "Memory saving on the ShareGPT dataset ranges from 16.2% to 30.5% on parallel sampling and from 44.3% to 66.3% on beam search.",
+                              "evidence": [],
+                              "facets": null,
+                              "children": [],
+                              "depends_on": [
+                                "M6"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            }
+                          ],
+                          "depends_on": [
+                            "M2"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        {
+                          "claim_id": "M7",
+                          "claim_type": "method",
+                          "statement": "The design of vLLM handles variable-length input and output sequences, allowing efficient KV cache usage across requests of differing lengths.",
+                          "evidence": [],
+                          "facets": {
+                            "claim": {
+                              "claim_id": "M7",
+                              "claim_type": "method",
+                              "statement": "The design of vLLM handles variable-length input and output sequences, allowing efficient KV cache usage across requests of differing lengths.",
+                              "source_section": "4 Method",
+                              "evidence": [],
+                              "entity_names": [
+                                "vLLM"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            },
+                            "universal_facets": {
+                              "intervention_types": [
+                                "systems"
+                              ],
+                              "scope": "system",
+                              "improves_or_replaces": "existing KV cache management",
+                              "core_tradeoff": "Efficient KV cache usage vs. variable-length sequence handling",
+                              "grounding": "empirical_demo",
+                              "analogy_source": null
+                            },
+                            "systems_facets": {
+                              "s1_resource": "GPU memory",
+                              "s2_alloc_unit": "UNSPECIFIED",
+                              "s3_stack_layer": "application_level",
+                              "s4_mapping": "logical KV cache -> physical GPU memory via KV cache manager",
+                              "s5_policy": "UNSPECIFIED",
+                              "s6_hw_assumption": "distributed GPU workers"
+                            },
+                            "architecture_facets": null,
+                            "objective_facets": null,
+                            "algorithm_facets": null,
+                            "theory_facets": null,
+                            "representation_facets": null,
+                            "evaluation_facets": null,
+                            "pipeline_facets": null
+                          },
+                          "children": [
+                            {
+                              "claim_id": "R8",
+                              "claim_type": "result",
+                              "statement": "ShareGPT dataset has 8.4× longer input prompts and 5.8× longer outputs on average than the Alpaca dataset.",
+                              "evidence": [],
+                              "facets": null,
+                              "children": [],
+                              "depends_on": [
+                                "M7"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            }
+                          ],
+                          "depends_on": [
+                            "M2"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        {
+                          "claim_id": "R18",
+                          "claim_type": "result",
+                          "statement": "PagedAttention makes vLLM significantly outperform FasterTransformer in end-to-end performance.",
+                          "evidence": [],
+                          "facets": null,
+                          "children": [],
+                          "depends_on": [
+                            "M5"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        }
+                      ],
+                      "depends_on": [
+                        "M2"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    }
+                  ],
+                  "depends_on": [
+                    "M2"
+                  ],
+                  "rejected_what": null,
+                  "rejected_why": null
+                },
+                {
+                  "claim_id": "M27",
+                  "claim_type": "method",
+                  "statement": "vLLM is an end-to-end serving system with a FastAPI frontend and a GPU-based inference engine.",
+                  "evidence": [],
+                  "facets": {
+                    "claim": {
+                      "claim_id": "M27",
+                      "claim_type": "method",
+                      "statement": "vLLM is an end-to-end serving system with a FastAPI frontend and a GPU-based inference engine.",
+                      "source_section": "Implementation",
+                      "evidence": [],
+                      "entity_names": [
+                        "vLLM",
+                        "FastAPI",
+                        "GPU-based inference engine"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    "universal_facets": {
+                      "intervention_types": [
+                        "systems"
+                      ],
+                      "scope": "system",
+                      "improves_or_replaces": "UNSPECIFIED",
+                      "core_tradeoff": "UNSPECIFIED",
+                      "grounding": "qualitative",
+                      "analogy_source": null
+                    },
+                    "systems_facets": {
+                      "s1_resource": "UNSPECIFIED",
+                      "s2_alloc_unit": "KV block",
+                      "s3_stack_layer": "application_level",
+                      "s4_mapping": "KV block -> GPU memory via block manager",
+                      "s5_policy": "UNSPECIFIED",
+                      "s6_hw_assumption": "GPU with CUDA support"
+                    },
+                    "architecture_facets": null,
+                    "objective_facets": null,
+                    "algorithm_facets": null,
+                    "theory_facets": null,
+                    "representation_facets": null,
+                    "evaluation_facets": null,
+                    "pipeline_facets": null
+                  },
+                  "children": [
+                    {
+                      "claim_id": "M28",
+                      "claim_type": "method",
+                      "statement": "The frontend extends the OpenAI API interface, allowing users to customize sampling parameters for each request, such as maximum sequence length and beam width k.",
+                      "evidence": [],
+                      "facets": {
+                        "claim": {
+                          "claim_id": "M28",
+                          "claim_type": "method",
+                          "statement": "The frontend extends the OpenAI API interface, allowing users to customize sampling parameters for each request, such as maximum sequence length and beam width k.",
+                          "source_section": "Implementation",
+                          "evidence": [],
+                          "entity_names": [
+                            "OpenAI API",
+                            "sampling parameters",
+                            "maximum sequence length",
+                            "beam width k"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        "universal_facets": {
+                          "intervention_types": [
+                            "systems"
+                          ],
+                          "scope": "drop_in",
+                          "improves_or_replaces": "OpenAI API interface",
+                          "core_tradeoff": "UNSPECIFIED",
+                          "grounding": "formal_only",
+                          "analogy_source": null
+                        },
+                        "systems_facets": {
+                          "s1_resource": "UNSPECIFIED",
+                          "s2_alloc_unit": "KV block",
+                          "s3_stack_layer": "application_level",
+                          "s4_mapping": "KV block -> GPU memory via block manager",
+                          "s5_policy": "UNSPECIFIED",
+                          "s6_hw_assumption": "GPU with CUDA"
+                        },
+                        "architecture_facets": null,
+                        "objective_facets": null,
+                        "algorithm_facets": null,
+                        "theory_facets": null,
+                        "representation_facets": null,
+                        "evaluation_facets": null,
+                        "pipeline_facets": null
+                      },
+                      "children": [],
+                      "depends_on": [
+                        "M27"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    {
+                      "claim_id": "M29",
+                      "claim_type": "method",
+                      "statement": "The vLLM engine is written in 8.5K lines of Python and 2K lines of C++/CUDA code.",
+                      "evidence": [],
+                      "facets": {
+                        "claim": {
+                          "claim_id": "M29",
+                          "claim_type": "method",
+                          "statement": "The vLLM engine is written in 8.5K lines of Python and 2K lines of C++/CUDA code.",
+                          "source_section": "Implementation",
+                          "evidence": [],
+                          "entity_names": [
+                            "vLLM engine",
+                            "Python",
+                            "C++/CUDA"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        "universal_facets": {
+                          "intervention_types": [
+                            "systems"
+                          ],
+                          "scope": "system",
+                          "improves_or_replaces": "UNSPECIFIED",
+                          "core_tradeoff": "UNSPECIFIED",
+                          "grounding": "qualitative",
+                          "analogy_source": null
+                        },
+                        "systems_facets": {
+                          "s1_resource": "UNSPECIFIED",
+                          "s2_alloc_unit": "KV block",
+                          "s3_stack_layer": "application_level",
+                          "s4_mapping": "KV block -> GPU memory via block manager",
+                          "s5_policy": "UNSPECIFIED",
+                          "s6_hw_assumption": "UNSPECIFIED"
+                        },
+                        "architecture_facets": null,
+                        "objective_facets": null,
+                        "algorithm_facets": null,
+                        "theory_facets": null,
+                        "representation_facets": null,
+                        "evaluation_facets": null,
+                        "pipeline_facets": null
+                      },
+                      "children": [
+                        {
+                          "claim_id": "M30",
+                          "claim_type": "method",
+                          "statement": "We develop control-related components including the scheduler and the block manager in Python while developing custom CUDA kernels for key operations such as PagedAttention.",
+                          "evidence": [],
+                          "facets": {
+                            "claim": {
+                              "claim_id": "M30",
+                              "claim_type": "method",
+                              "statement": "We develop control-related components including the scheduler and the block manager in Python while developing custom CUDA kernels for key operations such as PagedAttention.",
+                              "source_section": "Implementation",
+                              "evidence": [],
+                              "entity_names": [
+                                "scheduler",
+                                "block manager",
+                                "Python",
+                                "CUDA kernels",
+                                "PagedAttention"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            },
+                            "universal_facets": {
+                              "intervention_types": [
+                                "systems"
+                              ],
+                              "scope": "system",
+                              "improves_or_replaces": "UNSPECIFIED",
+                              "core_tradeoff": "UNSPECIFIED",
+                              "grounding": "qualitative",
+                              "analogy_source": null
+                            },
+                            "systems_facets": {
+                              "s1_resource": "GPU memory for KV blocks",
+                              "s2_alloc_unit": "KV block",
+                              "s3_stack_layer": "application_level",
+                              "s4_mapping": "UNSPECIFIED",
+                              "s5_policy": "UNSPECIFIED",
+                              "s6_hw_assumption": "NVIDIA GPU with CUDA and NCCL support"
+                            },
+                            "architecture_facets": null,
+                            "objective_facets": null,
+                            "algorithm_facets": null,
+                            "theory_facets": null,
+                            "representation_facets": null,
+                            "evaluation_facets": null,
+                            "pipeline_facets": null
+                          },
+                          "children": [
+                            {
+                              "claim_id": "R20",
+                              "claim_type": "result",
+                              "statement": "In the Alpaca trace, block sizes 16 and 32 work well, while larger block sizes significantly degrade performance.",
+                              "evidence": [],
+                              "facets": null,
+                              "children": [],
+                              "depends_on": [
+                                "M30"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            }
+                          ],
+                          "depends_on": [
+                            "M27"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        }
+                      ],
+                      "depends_on": [
+                        "M27"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    {
+                      "claim_id": "M31",
+                      "claim_type": "method",
+                      "statement": "For the model executor, we implement popular LLMs such as GPT, OPT, and LLaMA using PyTorch and Transformers.",
+                      "evidence": [],
+                      "facets": {
+                        "claim": {
+                          "claim_id": "M31",
+                          "claim_type": "method",
+                          "statement": "For the model executor, we implement popular LLMs such as GPT, OPT, and LLaMA using PyTorch and Transformers.",
+                          "source_section": "Implementation",
+                          "evidence": [],
+                          "entity_names": [
+                            "GPT",
+                            "OPT",
+                            "LLaMA",
+                            "PyTorch",
+                            "Transformers"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        "universal_facets": {
+                          "intervention_types": [
+                            "systems"
+                          ],
+                          "scope": "system",
+                          "improves_or_replaces": "UNSPECIFIED",
+                          "core_tradeoff": "UNSPECIFIED",
+                          "grounding": "empirical_demo",
+                          "analogy_source": null
+                        },
+                        "systems_facets": {
+                          "s1_resource": "UNSPECIFIED",
+                          "s2_alloc_unit": "KV block",
+                          "s3_stack_layer": "application_level",
+                          "s4_mapping": "UNSPECIFIED",
+                          "s5_policy": "UNSPECIFIED",
+                          "s6_hw_assumption": "CUDA-capable GPUs"
+                        },
+                        "architecture_facets": null,
+                        "objective_facets": null,
+                        "algorithm_facets": null,
+                        "theory_facets": null,
+                        "representation_facets": null,
+                        "evaluation_facets": null,
+                        "pipeline_facets": null
+                      },
+                      "children": [],
+                      "depends_on": [
+                        "M27"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    {
+                      "claim_id": "M32",
+                      "claim_type": "method",
+                      "statement": "We use NCCL for tensor communication across distributed GPU workers.",
+                      "evidence": [],
+                      "facets": {
+                        "claim": {
+                          "claim_id": "M32",
+                          "claim_type": "method",
+                          "statement": "We use NCCL for tensor communication across distributed GPU workers.",
+                          "source_section": "Implementation",
+                          "evidence": [],
+                          "entity_names": [
+                            "NCCL",
+                            "tensor communication",
+                            "distributed GPU workers"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        "universal_facets": {
+                          "intervention_types": [
+                            "systems"
+                          ],
+                          "scope": "system",
+                          "improves_or_replaces": "UNSPECIFIED",
+                          "core_tradeoff": "UNSPECIFIED",
+                          "grounding": "formal_only",
+                          "analogy_source": null
+                        },
+                        "systems_facets": {
+                          "s1_resource": "tensor communication across distributed GPU workers",
+                          "s2_alloc_unit": "UNSPECIFIED",
+                          "s3_stack_layer": "runtime",
+                          "s4_mapping": "tensor -> GPU worker via NCCL",
+                          "s5_policy": "UNSPECIFIED",
+                          "s6_hw_assumption": "UNSPECIFIED"
+                        },
+                        "architecture_facets": null,
+                        "objective_facets": null,
+                        "algorithm_facets": null,
+                        "theory_facets": null,
+                        "representation_facets": null,
+                        "evaluation_facets": null,
+                        "pipeline_facets": null
+                      },
+                      "children": [],
+                      "depends_on": [
+                        "M27"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    }
+                  ],
+                  "depends_on": [
+                    "M2"
+                  ],
+                  "rejected_what": null,
+                  "rejected_why": null
+                },
+                {
+                  "claim_id": "M11",
+                  "claim_type": "method",
+                  "statement": "Each request’s KV cache is represented as a series of logical KV blocks that are filled sequentially, with the last block’s unfilled positions reserved for future generations.",
+                  "evidence": [],
+                  "facets": {
+                    "claim": {
+                      "claim_id": "M11",
+                      "claim_type": "method",
+                      "statement": "Each request’s KV cache is represented as a series of logical KV blocks that are filled sequentially, with the last block’s unfilled positions reserved for future generations.",
+                      "source_section": "4.2 KV Cache Manager",
+                      "evidence": [],
+                      "entity_names": [
+                        "logical KV blocks",
+                        "request’s KV cache"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    "universal_facets": {
+                      "intervention_types": [
+                        "systems"
+                      ],
+                      "scope": "module",
+                      "improves_or_replaces": "existing KV cache systems that pre-reserve memory for all positions",
+                      "core_tradeoff": "UNSPECIFIED",
+                      "grounding": "qualitative",
+                      "analogy_source": "virtual memory"
+                    },
+                    "systems_facets": {
+                      "s1_resource": "GPU memory (GPU DRAM)",
+                      "s2_alloc_unit": "KV block",
+                      "s3_stack_layer": "runtime",
+                      "s4_mapping": "Logical KV blocks -> physical KV blocks via block tables",
+                      "s5_policy": "Allocate physical KV blocks on demand, reserving unfilled positions for future generations",
+                      "s6_hw_assumption": "GPU with contiguous DRAM allocation capability"
+                    },
+                    "architecture_facets": null,
+                    "objective_facets": null,
+                    "algorithm_facets": null,
+                    "theory_facets": null,
+                    "representation_facets": null,
+                    "evaluation_facets": null,
+                    "pipeline_facets": null
+                  },
+                  "children": [
+                    {
+                      "claim_id": "M12",
+                      "claim_type": "method",
+                      "statement": "The KV Cache Manager maintains block tables that map logical KV blocks to physical KV blocks, recording physical block numbers and the number of filled positions, allowing the cache to grow dynamically without pre‑reserving all positions.",
+                      "evidence": [],
+                      "facets": {
+                        "claim": {
+                          "claim_id": "M12",
+                          "claim_type": "method",
+                          "statement": "The KV Cache Manager maintains block tables that map logical KV blocks to physical KV blocks, recording physical block numbers and the number of filled positions, allowing the cache to grow dynamically without pre‑reserving all positions.",
+                          "source_section": "4.2 KV Cache Manager",
+                          "evidence": [],
+                          "entity_names": [
+                            "block tables",
+                            "physical KV blocks"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        "universal_facets": {
+                          "intervention_types": [
+                            "systems"
+                          ],
+                          "scope": "module",
+                          "improves_or_replaces": "UNSPECIFIED",
+                          "core_tradeoff": "UNSPECIFIED",
+                          "grounding": "qualitative",
+                          "analogy_source": "virtual memory in operating systems"
+                        },
+                        "systems_facets": {
+                          "s1_resource": "GPU memory",
+                          "s2_alloc_unit": "KV block",
+                          "s3_stack_layer": "runtime",
+                          "s4_mapping": "Logical KV block -> physical KV block via block table mapping",
+                          "s5_policy": "Allocate physical KV blocks on demand as logical blocks are filled",
+                          "s6_hw_assumption": "GPU DRAM contiguous allocation capability"
+                        },
+                        "architecture_facets": null,
+                        "objective_facets": null,
+                        "algorithm_facets": null,
+                        "theory_facets": null,
+                        "representation_facets": null,
+                        "evaluation_facets": null,
+                        "pipeline_facets": null
+                      },
+                      "children": [
+                        {
+                          "claim_id": "M14",
+                          "claim_type": "method",
+                          "statement": "Separating logical and physical KV blocks eliminates most memory waste due to fragmentation and redundant duplication.",
+                          "evidence": [],
+                          "facets": {
+                            "claim": {
+                              "claim_id": "M14",
+                              "claim_type": "method",
+                              "statement": "Separating logical and physical KV blocks eliminates most memory waste due to fragmentation and redundant duplication.",
+                              "source_section": "4.2 KV Cache Manager",
+                              "evidence": [],
+                              "entity_names": [
+                                "memory waste",
+                                "fragmentation",
+                                "redundant duplication"
+                              ],
+                              "rejected_what": null,
+                              "rejected_why": null
+                            },
+                            "universal_facets": {
+                              "intervention_types": [
+                                "systems"
+                              ],
+                              "scope": "system",
+                              "improves_or_replaces": "Existing KV cache memory allocation methods that waste memory due to fragmentation and duplication",
+                              "core_tradeoff": "UNSPECIFIED",
+                              "grounding": "qualitative",
+                              "analogy_source": "virtual memory"
+                            },
+                            "systems_facets": {
+                              "s1_resource": "GPU memory",
+                              "s2_alloc_unit": "KV block",
+                              "s3_stack_layer": "runtime",
+                              "s4_mapping": "logical KV block -> physical KV block via block table",
+                              "s5_policy": "allocate physical KV blocks on demand",
+                              "s6_hw_assumption": "GPU with contiguous DRAM allocation"
+                            },
+                            "architecture_facets": null,
+                            "objective_facets": null,
+                            "algorithm_facets": null,
+                            "theory_facets": null,
+                            "representation_facets": null,
+                            "evaluation_facets": null,
+                            "pipeline_facets": null
+                          },
+                          "children": [],
+                          "depends_on": [
+                            "M2"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        }
+                      ],
+                      "depends_on": [
+                        "M2"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    }
+                  ],
+                  "depends_on": [
+                    "M2"
+                  ],
+                  "rejected_what": null,
+                  "rejected_why": null
+                },
+                {
+                  "claim_id": "M3",
+                  "claim_type": "method",
+                  "statement": "The serving system’s throughput is memory‑bound, constrained by the space allocated to store the KV cache.",
+                  "evidence": [],
+                  "facets": {
+                    "claim": {
+                      "claim_id": "M3",
+                      "claim_type": "method",
+                      "statement": "The serving system’s throughput is memory‑bound, constrained by the space allocated to store the KV cache.",
+                      "source_section": "3 Memory Challenges in LLM Serving",
+                      "evidence": [],
+                      "entity_names": [],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    "universal_facets": {
+                      "intervention_types": [
+                        "systems"
+                      ],
+                      "scope": "system",
+                      "improves_or_replaces": "UNSPECIFIED",
+                      "core_tradeoff": "Memory capacity limits throughput",
+                      "grounding": "empirical_demo",
+                      "analogy_source": null
+                    },
+                    "systems_facets": {
+                      "s1_resource": "GPU memory",
+                      "s2_alloc_unit": "token",
+                      "s3_stack_layer": "application_level",
+                      "s4_mapping": "KV cache -> GPU memory via allocation",
+                      "s5_policy": "UNSPECIFIED",
+                      "s6_hw_assumption": "GPU memory capacity (80GB)"
+                    },
+                    "architecture_facets": null,
+                    "objective_facets": null,
+                    "algorithm_facets": null,
+                    "theory_facets": null,
+                    "representation_facets": null,
+                    "evaluation_facets": null,
+                    "pipeline_facets": null
+                  },
+                  "children": [
+                    {
+                      "claim_id": "R3",
+                      "claim_type": "result",
+                      "statement": "GPU computation speed grows faster than memory capacity; for example, from NVIDIA A100 to H100, FLOPS increases by more than 2× while GPU memory remains at 80 GB.",
+                      "evidence": [],
+                      "facets": null,
+                      "children": [],
+                      "depends_on": [
+                        "M3"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    {
+                      "claim_id": "R4",
+                      "claim_type": "result",
+                      "statement": "In our experiment (§6.3), the KV cache of the prompt part accounts for 12 % of the total KV cache memory.",
+                      "evidence": [],
+                      "facets": null,
+                      "children": [],
+                      "depends_on": [
+                        "M3"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    {
+                      "claim_id": "R5",
+                      "claim_type": "result",
+                      "statement": "In beam search, different request beams can share up to 55 % of their KV cache memory, as shown in §6.3.",
+                      "evidence": [],
+                      "facets": null,
+                      "children": [],
+                      "depends_on": [
+                        "M3"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    {
+                      "claim_id": "N1",
+                      "claim_type": "negative",
+                      "statement": "Inefficient memory management can further decrease the batch size, as shown in Fig. 2.",
+                      "evidence": [],
+                      "facets": null,
+                      "children": [],
+                      "depends_on": [
+                        "M3"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    {
+                      "claim_id": "A1",
+                      "claim_type": "assumption",
+                      "statement": "The system needs to make scheduling decisions, such as deleting or swapping out the KV cache of some requests from GPU memory.",
+                      "evidence": [],
+                      "facets": null,
+                      "children": [],
+                      "depends_on": [
+                        "M3"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    }
+                  ],
+                  "depends_on": [
+                    "M2"
+                  ],
+                  "rejected_what": null,
+                  "rejected_why": null
+                },
+                {
+                  "claim_id": "M36",
+                  "claim_type": "method",
+                  "statement": "vLLM implements decoding algorithms using three key methods: fork, append, and free.",
+                  "evidence": [],
+                  "facets": {
+                    "claim": {
+                      "claim_id": "M36",
+                      "claim_type": "method",
+                      "statement": "vLLM implements decoding algorithms using three key methods: fork, append, and free.",
+                      "source_section": "5.2 Supporting Various Decoding Algorithms",
+                      "evidence": [],
+                      "entity_names": [
+                        "vLLM",
+                        "fork",
+                        "append",
+                        "free"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    "universal_facets": {
+                      "intervention_types": [
+                        "algorithm",
+                        "systems"
+                      ],
+                      "scope": "module",
+                      "improves_or_replaces": "UNSPECIFIED",
+                      "core_tradeoff": "UNSPECIFIED",
+                      "grounding": "formal_only",
+                      "analogy_source": null
+                    },
+                    "systems_facets": null,
+                    "architecture_facets": null,
+                    "objective_facets": null,
+                    "algorithm_facets": {
+                      "g1": "search",
+                      "g2": "sequence",
+                      "g3": "UNSPECIFIED",
+                      "g4": "UNSPECIFIED",
+                      "g5": "UNSPECIFIED"
+                    },
+                    "theory_facets": null,
+                    "representation_facets": null,
+                    "evaluation_facets": null,
+                    "pipeline_facets": null
+                  },
+                  "children": [
+                    {
+                      "claim_id": "M37",
+                      "claim_type": "method",
+                      "statement": "The fork method creates a new sequence from an existing one.",
+                      "evidence": [],
+                      "facets": {
+                        "claim": {
+                          "claim_id": "M37",
+                          "claim_type": "method",
+                          "statement": "The fork method creates a new sequence from an existing one.",
+                          "source_section": "5.2 Supporting Various Decoding Algorithms",
+                          "evidence": [],
+                          "entity_names": [
+                            "fork"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        "universal_facets": {
+                          "intervention_types": [
+                            "algorithm",
+                            "systems"
+                          ],
+                          "scope": "module",
+                          "improves_or_replaces": "UNSPECIFIED",
+                          "core_tradeoff": "UNSPECIFIED",
+                          "grounding": "empirical_demo",
+                          "analogy_source": null
+                        },
+                        "systems_facets": null,
+                        "architecture_facets": null,
+                        "objective_facets": null,
+                        "algorithm_facets": {
+                          "g1": "sampling",
+                          "g2": "sequence",
+                          "g3": "UNSPECIFIED",
+                          "g4": "UNSPECIFIED",
+                          "g5": "UNSPECIFIED"
+                        },
+                        "theory_facets": null,
+                        "representation_facets": null,
+                        "evaluation_facets": null,
+                        "pipeline_facets": null
+                      },
+                      "children": [],
+                      "depends_on": [
+                        "M36"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    },
+                    {
+                      "claim_id": "M38",
+                      "claim_type": "method",
+                      "statement": "The append method appends a new token to the sequence.",
+                      "evidence": [],
+                      "facets": {
+                        "claim": {
+                          "claim_id": "M38",
+                          "claim_type": "method",
+                          "statement": "The append method appends a new token to the sequence.",
+                          "source_section": "5.2 Supporting Various Decoding Algorithms",
+                          "evidence": [],
+                          "entity_names": [
+                            "append"
+                          ],
+                          "rejected_what": null,
+                          "rejected_why": null
+                        },
+                        "universal_facets": {
+                          "intervention_types": [
+                            "systems"
+                          ],
+                          "scope": "module",
+                          "improves_or_replaces": "UNSPECIFIED",
+                          "core_tradeoff": "UNSPECIFIED",
+                          "grounding": "formal_only",
+                          "analogy_source": null
+                        },
+                        "systems_facets": {
+                          "s1_resource": "token sequence",
+                          "s2_alloc_unit": "token",
+                          "s3_stack_layer": "application_level",
+                          "s4_mapping": "UNSPECIFIED",
+                          "s5_policy": "UNSPECIFIED",
+                          "s6_hw_assumption": "UNSPECIFIED"
+                        },
+                        "architecture_facets": null,
+                        "objective_facets": null,
+                        "algorithm_facets": null,
+                        "theory_facets": null,
+                        "representation_facets": null,
+                        "evaluation_facets": null,
+                        "pipeline_facets": null
+                      },
+                      "children": [],
+                      "depends_on": [
+                        "M36"
+                      ],
+                      "rejected_what": null,
+                      "rejected_why": null
+                    }
+                  ],
+                  "depends_on": [
+                    "M2"
+                  ],
+                  "rejected_what": null,
+                  "rejected_why": null
+                }
+              ],
+              "depends_on": [
+                "M1"
+              ],
+              "rejected_what": null,
+              "rejected_why": null
+            }
+          ],
+          "depends_on": [
+            "C1",
+            "C2",
+            "C3",
+            "C4"
+          ],
+          "rejected_what": null,
+          "rejected_why": null
+        }
+      ],
+      "depends_on": [],
+      "rejected_what": null,
+      "rejected_why": null
+    }
+  ],
+  "negative_claims": [
+    {
+      "claim_id": "N1",
+      "claim_type": "negative",
+      "statement": "Inefficient memory management can further decrease the batch size, as shown in Fig. 2.",
+      "source_section": "3 Memory Challenges in LLM Serving",
+      "evidence": [],
+      "entity_names": [],
+      "rejected_what": null,
+      "rejected_why": null
+    },
+    {
+      "claim_id": "N2",
+      "claim_type": "negative",
+      "statement": "Compaction is impractical in performance-sensitive LLM serving systems due to the massive KV cache.",
+      "source_section": "3.1 Memory Management in Existing Systems",
+      "evidence": [],
+      "entity_names": [
+        "compaction",
+        "KV cache",
+        "LLM serving system"
+      ],
+      "rejected_what": "compaction",
+      "rejected_why": "impractical due to massive KV cache"
+    },
+    {
+      "claim_id": "N3",
+      "claim_type": "negative",
+      "statement": "Pre-allocated chunk space for each request prevents memory sharing specific to decoding algorithms in existing memory management systems.",
+      "source_section": "3.1 Memory Management in Existing Systems",
+      "evidence": [],
+      "entity_names": [
+        "pre-allocation",
+        "KV cache",
+        "decoding algorithms"
+      ],
+      "rejected_what": "pre-allocation of KV cache",
+      "rejected_why": "prevents memory sharing specific to decoding algorithms"
+    }
+  ],
+  "all_artifacts": [
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 1",
+      "caption": "Figure 1. Left: Memory layout when serving an LLM with",
+      "source_page": 1
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 2",
+      "caption": "Figure 2. Average percentage of memory wastes in different",
+      "source_page": 2
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Fig 1",
+      "caption": "Fig. 1 (right).",
+      "source_page": 2
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 3",
+      "caption": "Figure 3. KV cache memory management in existing systems. Three types of memory wastes – reserved, internal fragmentation,",
+      "source_page": 4
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Fig 3",
+      "caption": "Fig. 3 illustrates two requests: request A with 2048 max-",
+      "source_page": 4
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 4",
+      "caption": "Figure 4. vLLM system overview.",
+      "source_page": 5
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 5",
+      "caption": "Figure 5. Illustration of the PagedAttention algorithm,",
+      "source_page": 5
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 6",
+      "caption": "Figure 6. Block table translation in vLLM.",
+      "source_page": 6
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 7",
+      "caption": "Figure 7. Storing the KV cache of two requests at the same",
+      "source_page": 6
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 8",
+      "caption": "Figure 8. Parallel sampling example.",
+      "source_page": 7
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Fig 8",
+      "caption": "Fig. 8 shows an example of parallel decoding for two out-",
+      "source_page": 7
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 9",
+      "caption": "Figure 9. Beam search example.",
+      "source_page": 7
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 10",
+      "caption": "Figure 10. Shared prompt example for machine translation.",
+      "source_page": 8
+    },
+    {
+      "artifact_type": "table",
+      "artifact_id": "Table 1",
+      "caption": "Table 1. Model sizes and server configurations.",
+      "source_page": 9
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 11",
+      "caption": "Figure 11. Input and output length distributions of the (a)",
+      "source_page": 9
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 12",
+      "caption": "Figure 12. Single sequence generation with OPT models on the ShareGPT and Alpaca dataset",
+      "source_page": 10
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 13",
+      "caption": "Figure 13. Average number of batched requests when serv-",
+      "source_page": 10
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 14",
+      "caption": "Figure 14. Parallel generation and beam search with OPT-13B on the Alpaca dataset.",
+      "source_page": 11
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 15",
+      "caption": "Figure 15. Average amount of memory saving from sharing",
+      "source_page": 11
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Fig 14",
+      "caption": "Fig. 14 shows the results for beam search with different beam",
+      "source_page": 11
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Fig 15",
+      "caption": "Fig. 15 plots the amount of memory saving, computed by",
+      "source_page": 11
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 16",
+      "caption": "Figure 16. Translation workload where the input prompts",
+      "source_page": 12
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 17",
+      "caption": "Figure 17. Performance on chatbot workload.",
+      "source_page": 12
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Fig 10",
+      "caption": "Fig. 10. For the model, we use LLaMA-13B [ 52 ], which is mul-",
+      "source_page": 12
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Fig 17",
+      "caption": "Fig. 17 shows that vLLM can sustain 2 × higher request",
+      "source_page": 12
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 18",
+      "caption": "Figure 18. Ablation experiments.",
+      "source_page": 12
+    },
+    {
+      "artifact_type": "figure",
+      "artifact_id": "Figure 19",
+      "caption": "Figure 19. (a) Overhead of recomputation and swapping for",
+      "source_page": 13
+    }
+  ],
+  "extraction_cost_usd": 0.0438238
+}

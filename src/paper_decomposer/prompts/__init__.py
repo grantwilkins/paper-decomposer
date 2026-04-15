@@ -1,0 +1,68 @@
+"""Prompt templates for paper_decomposer."""
+
+from .facets import (
+    CLASSIFY_SYSTEM_PROMPT,
+    build_algorithm_facet_prompt,
+    build_architecture_facet_prompt,
+    build_classify_prompt,
+    build_data_facet_prompt,
+    build_evaluation_facet_prompt,
+    build_objective_facet_prompt,
+    build_pipeline_facet_prompt,
+    build_representation_facet_prompt,
+    build_systems_facet_prompt,
+    build_theory_facet_prompt,
+    build_universal_prompt,
+    extract_facets,
+    get_facet_prompt,
+    get_facet_schema,
+)
+from .dedup import DEDUP_PROMPT, apply_dedup, build_dedup_prompt, deduplicate_claims
+from .seed import SEED_SYSTEM_PROMPT, build_seed_prompt, extract_seed
+from .section import (
+    BACKGROUND_INSTRUCTIONS,
+    DISCUSSION_INSTRUCTIONS,
+    EVALUATION_INSTRUCTIONS,
+    INTRODUCTION_INSTRUCTIONS,
+    METHOD_INSTRUCTIONS,
+    build_section_prompt,
+    extract_section_claims,
+    get_instructions_for_role,
+)
+from .tree import TREE_SYSTEM_PROMPT, assemble_tree, build_tree_prompt
+
+__all__ = [
+    "CLASSIFY_SYSTEM_PROMPT",
+    "build_classify_prompt",
+    "build_systems_facet_prompt",
+    "build_architecture_facet_prompt",
+    "build_objective_facet_prompt",
+    "build_algorithm_facet_prompt",
+    "build_theory_facet_prompt",
+    "build_representation_facet_prompt",
+    "build_evaluation_facet_prompt",
+    "build_pipeline_facet_prompt",
+    "build_data_facet_prompt",
+    "get_facet_prompt",
+    "get_facet_schema",
+    "build_universal_prompt",
+    "extract_facets",
+    "DEDUP_PROMPT",
+    "build_dedup_prompt",
+    "apply_dedup",
+    "deduplicate_claims",
+    "TREE_SYSTEM_PROMPT",
+    "build_tree_prompt",
+    "assemble_tree",
+    "SEED_SYSTEM_PROMPT",
+    "build_seed_prompt",
+    "extract_seed",
+    "BACKGROUND_INSTRUCTIONS",
+    "DISCUSSION_INSTRUCTIONS",
+    "EVALUATION_INSTRUCTIONS",
+    "INTRODUCTION_INSTRUCTIONS",
+    "METHOD_INSTRUCTIONS",
+    "build_section_prompt",
+    "extract_section_claims",
+    "get_instructions_for_role",
+]
