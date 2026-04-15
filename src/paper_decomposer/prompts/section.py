@@ -210,6 +210,42 @@ _PROCEDURAL_VERB_RE = re.compile(
     r"(select|allocate|fetch|gather|store|write|read|concatenate|append|schedule|update|dispatch|iterate|lookup)",
     re.IGNORECASE,
 )
+_TRADEOFF_CUE_RE = re.compile(
+    r"(trade-?off|at the cost of|without sacrificing|while .* (reducing|improving)|invariant|guarantee|bounded)",
+    re.IGNORECASE,
+)
+_IMPLEMENTATION_SECTION_RE = re.compile(
+    r"(implementation|engineering|system details|runtime details|serving stack|deployment)",
+    re.IGNORECASE,
+)
+_IMPLEMENTS_USING_RE = re.compile(
+    r"\b(implement(?:s|ed|ing)?|build(?:s|ing|t)?)\b.+\b(using|with|via)\b",
+    re.IGNORECASE,
+)
+_CODEBASE_FACT_RE = re.compile(
+    r"(\d+(?:\.\d+)?\s*[km]?\s*(lines?|loc)\s*(of code)?|written in\s+\d+(?:\.\d+)?\s*[km]?\s*lines?)",
+    re.IGNORECASE,
+)
+_FRAMEWORK_USAGE_RE = re.compile(
+    r"\b(nccl|fastapi|pytorch|transformers|tensorflow|jax|flask|triton|cuda)\b",
+    re.IGNORECASE,
+)
+_API_SURFACE_RE = re.compile(
+    r"\b(api|interface|endpoint|frontend|ui|web app|cli|sdk|openai compatible|allows users to|allows user to)\b",
+    re.IGNORECASE,
+)
+_TAUTOLOGICAL_OPERATION_RE = re.compile(
+    r"(append(?:s|ed|ing)?\s+(?:a|the)?\s*token|free(?:s|d|ing)?\s+(?:a|the)?\s*sequence|delete(?:s|d|ing)?\s+(?:a|the)?\s*sequence)",
+    re.IGNORECASE,
+)
+_MECHANISM_ANCHOR_RE = re.compile(
+    r"(mechanism|module|component|manager|scheduler|allocator|kernel|block table|policy|cache)",
+    re.IGNORECASE,
+)
+_EVAL_FINDING_CUE_RE = re.compile(
+    r"(ablation|benchmark|baseline|dataset|experiment|measured|measures|throughput|latency|accuracy|f1|bleu|rouge)",
+    re.IGNORECASE,
+)
 _TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 _STOPWORDS = {
     "a",
@@ -643,6 +679,170 @@ def _has_nonprocedural_method_anchor(claim: RawClaim, candidates: list[RawClaim]
     return False
 
 
+def _is_implementation_section(section: Section) -> bool:
+    return bool(_IMPLEMENTATION_SECTION_RE.search(section.title))
+
+
+def _has_evaluation_finding_signal(claim: RawClaim) -> bool:
+    lowered = claim.statement.lower()
+    if claim.claim_type == ClaimType.result and _RESULT_CUE_RE.search(lowered):
+        if _NUMBER_RE.search(lowered) or claim.evidence:
+            return True
+    if _EVAL_FINDING_CUE_RE.search(lowered) and (_NUMBER_RE.search(lowered) or claim.evidence):
+        return True
+    return False
+
+
+def _has_mechanism_signal(claim: RawClaim) -> bool:
+    lowered = claim.statement.lower()
+    if _HIGH_LEVEL_METHOD_RE.search(lowered) or _MECHANISM_CUE_RE.search(lowered):
+        return True
+    if _MECHANISM_ANCHOR_RE.search(lowered):
+        return True
+    if claim.entity_names and re.search(r"\b(uses|maps|routes|partitions|manages|schedules|allocates)\b", lowered):
+        return True
+    return False
+
+
+def _has_invariant_or_tradeoff_signal(claim: RawClaim) -> bool:
+    lowered = claim.statement.lower()
+    if _TRADEOFF_CUE_RE.search(lowered):
+        return True
+    return bool(re.search(r"\b(if|when|unless|requires|subject to|constraint)\b", lowered))
+
+
+def _has_key_systems_choice_signal(claim: RawClaim) -> bool:
+    lowered = claim.statement.lower()
+    if not _MECHANISM_ANCHOR_RE.search(lowered):
+        return False
+    return bool(_has_invariant_or_tradeoff_signal(claim) or _has_evaluation_finding_signal(claim) or _MECHANISM_CUE_RE.search(lowered))
+
+
+def _has_argumentative_force(claim: RawClaim) -> bool:
+    if claim.claim_type in {ClaimType.result, ClaimType.assumption, ClaimType.negative}:
+        return True
+    if claim.evidence and _NUMBER_RE.search(claim.statement):
+        return True
+    if _has_evaluation_finding_signal(claim):
+        return True
+    if _has_invariant_or_tradeoff_signal(claim):
+        return True
+    return _has_mechanism_signal(claim) and bool(claim.entity_names)
+
+
+def _matches_hard_suppression_pattern(claim: RawClaim) -> bool:
+    lowered = claim.statement.lower()
+    if _CODEBASE_FACT_RE.search(lowered):
+        return True
+    if _TAUTOLOGICAL_OPERATION_RE.search(lowered):
+        return True
+
+    if not _has_argumentative_force(claim):
+        if _IMPLEMENTS_USING_RE.search(lowered):
+            return True
+        if _FRAMEWORK_USAGE_RE.search(lowered):
+            return True
+        if _API_SURFACE_RE.search(lowered):
+            return True
+
+    return False
+
+
+def _passes_section_role_gate(claim: RawClaim, section: Section) -> bool:
+    role = section.role
+
+    if _is_implementation_section(section):
+        if claim.claim_type == ClaimType.method:
+            return (
+                _has_mechanism_signal(claim)
+                and (_has_key_systems_choice_signal(claim) or _has_invariant_or_tradeoff_signal(claim) or _has_evaluation_finding_signal(claim))
+            )
+        return claim.claim_type in {ClaimType.result, ClaimType.assumption, ClaimType.negative}
+
+    if role in {RhetoricalRole.evaluation, RhetoricalRole.appendix}:
+        if claim.claim_type == ClaimType.result:
+            return _has_evaluation_finding_signal(claim)
+        if claim.claim_type == ClaimType.negative:
+            return bool(_NEGATIVE_CUE_RE.search(claim.statement.lower())) and (
+                _has_evaluation_finding_signal(claim) or bool(claim.evidence)
+            )
+        if claim.claim_type == ClaimType.assumption:
+            return bool(_ASSUMPTION_CUE_RE.search(claim.statement.lower())) and bool(claim.evidence)
+        return False
+
+    if role in {RhetoricalRole.method, RhetoricalRole.theory}:
+        if claim.claim_type == ClaimType.method:
+            return (
+                _has_mechanism_signal(claim)
+                or _has_invariant_or_tradeoff_signal(claim)
+                or _has_key_systems_choice_signal(claim)
+                or _has_evaluation_finding_signal(claim)
+            )
+        if claim.claim_type == ClaimType.result:
+            return _has_evaluation_finding_signal(claim)
+        return claim.claim_type in {ClaimType.assumption, ClaimType.negative}
+
+    return True
+
+
+def _claim_worthiness_score(claim: RawClaim, section: Section) -> float:
+    token_count = len(_claim_tokens(claim.statement))
+    evidence_count = len({pointer.artifact_id.strip() for pointer in claim.evidence if pointer.artifact_id.strip()})
+    entity_count = len({entity.strip().lower() for entity in claim.entity_names if entity.strip()})
+    lowered = claim.statement.lower()
+
+    score = float(token_count) / 4.0
+    score += float(evidence_count) * 1.0
+    score += float(min(entity_count, 2)) * 0.6
+
+    if claim.claim_type in {ClaimType.result, ClaimType.assumption, ClaimType.negative}:
+        score += 1.0
+    if _has_mechanism_signal(claim):
+        score += 1.0
+    if _has_invariant_or_tradeoff_signal(claim):
+        score += 1.0
+    if _has_evaluation_finding_signal(claim):
+        score += 1.2
+    if (
+        claim.structural_hints
+        and claim.structural_hints.local_role == ClaimLocalRole.implementation_detail
+        and not _has_key_systems_choice_signal(claim)
+    ):
+        score -= 0.8
+    if _FRAMEWORK_USAGE_RE.search(lowered):
+        score -= 0.6
+    if _API_SURFACE_RE.search(lowered):
+        score -= 0.8
+    if _CODEBASE_FACT_RE.search(lowered):
+        score -= 1.4
+    if _TAUTOLOGICAL_OPERATION_RE.search(lowered):
+        score -= 1.4
+    if _is_implementation_section(section):
+        score -= 0.4
+
+    return score
+
+
+def _worth_score_threshold(section: Section, stage: str) -> float:
+    if _is_implementation_section(section):
+        return 1.8 if stage == "pre" else 2.8
+    if section.role in {RhetoricalRole.evaluation, RhetoricalRole.appendix}:
+        return 2.0 if stage == "pre" else 2.8
+    if section.role in {RhetoricalRole.method, RhetoricalRole.theory}:
+        return 1.6 if stage == "pre" else 2.4
+    return 1.2 if stage == "pre" else 1.8
+
+
+def _should_keep_claim_for_stage(claim: RawClaim, section: Section, stage: str) -> bool:
+    if _matches_hard_suppression_pattern(claim):
+        return False
+    if _claim_worthiness_score(claim, section) < _worth_score_threshold(section, stage):
+        return False
+    if stage == "post" and not _passes_section_role_gate(claim, section):
+        return False
+    return True
+
+
 def _compact_section_claims(claims: list[RawClaim], seed_claims: list[RawClaim]) -> list[RawClaim]:
     compacted: list[RawClaim] = []
 
@@ -699,12 +899,16 @@ async def extract_section_claims(
             )
         except Exception:
             continue
+        if not _should_keep_claim_for_stage(normalized, section, stage="pre"):
+            continue
         normalized_claims.append(normalized)
 
-    postprocessed_claims = [
-        _postprocess_claim(claim, section=section, seed_claims=seed_claims)
-        for claim in normalized_claims
-    ]
+    postprocessed_claims: list[RawClaim] = []
+    for claim in normalized_claims:
+        processed = _postprocess_claim(claim, section=section, seed_claims=seed_claims)
+        if not _should_keep_claim_for_stage(processed, section, stage="post"):
+            continue
+        postprocessed_claims.append(processed)
     return SectionExtractionOutput(claims=_compact_section_claims(postprocessed_claims, seed_claims))
 
 

@@ -1,3 +1,15 @@
+"""
+Claim:
+Section extraction keeps argument-level claims and suppresses low-worth
+implementation inventory, API-surface descriptions, and evaluation restatements.
+
+Plausible wrong implementations:
+- Keep implementation inventory claims because they contain method verbs.
+- Keep framework/API usage statements even when they have no argumentative force.
+- Keep evaluation-section mechanism restatements that are not findings.
+- Apply filtering only before retagging and let low-worth claims survive afterward.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -357,6 +369,122 @@ def test_extract_section_claims_compacts_duplicates_and_procedural_details(
     assert sum("maps logical blocks to physical blocks" in statement for statement in statements) == 1
     assert by_id["r_mistyped"].claim_type == ClaimType.result
     assert [pointer.artifact_id for pointer in by_id["m_unknown_evidence"].evidence] == []
+
+
+def test_extract_section_claims_suppresses_inventory_and_api_surface_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    section = Section(
+        section_number="4.5",
+        title="Implementation Details",
+        role=RhetoricalRole.method,
+        body_text="Implementation details.",
+        char_count=23,
+    )
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type | None = None,
+        config: dict | None = None,
+    ) -> FlatSectionOutput:
+        assert tier == "small"
+        assert response_schema is FlatSectionOutput
+        return FlatSectionOutput(
+            claims=[
+                FlatClaim(
+                    claim_id="inv_loc",
+                    claim_type=ClaimType.method.value,
+                    statement="The engine is written in 8.5K lines of code.",
+                    entity_names=["engine"],
+                ),
+                FlatClaim(
+                    claim_id="inv_api",
+                    claim_type=ClaimType.method.value,
+                    statement="The frontend extends the OpenAI-compatible API interface for users.",
+                    entity_names=["frontend"],
+                ),
+                FlatClaim(
+                    claim_id="inv_libs",
+                    claim_type=ClaimType.method.value,
+                    statement="The runtime uses NCCL, FastAPI, and PyTorch.",
+                    entity_names=["runtime"],
+                ),
+                FlatClaim(
+                    claim_id="inv_ops",
+                    claim_type=ClaimType.method.value,
+                    statement="Append appends a token and free deletes a sequence.",
+                    entity_names=["allocator"],
+                ),
+                FlatClaim(
+                    claim_id="m_core",
+                    claim_type=ClaimType.method.value,
+                    statement=(
+                        "PagedAttention uses block-table indirection to reduce KV-cache "
+                        "fragmentation while preserving near-zero waste."
+                    ),
+                    entity_names=["PagedAttention", "block table"],
+                    evidence_ids=["Fig. 1"],
+                ),
+            ]
+        )
+
+    monkeypatch.setattr(section_prompts, "call_model", _fake_call_model)
+    artifacts = [
+        EvidenceArtifact(artifact_type="figure", artifact_id="Fig. 1", caption="Mechanism.", source_page=4),
+    ]
+    output = asyncio.run(extract_section_claims(section, [], artifacts, {"pipeline": {"section_extraction": {}}}))
+
+    ids = {claim.claim_id for claim in output.claims}
+    assert ids == {"m_core"}
+
+
+def test_extract_section_claims_evaluation_requires_findings_not_restatements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    section = Section(
+        section_number="5.1",
+        title="Main Results",
+        role=RhetoricalRole.evaluation,
+        body_text="Evaluation details.",
+        char_count=20,
+    )
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type | None = None,
+        config: dict | None = None,
+    ) -> FlatSectionOutput:
+        assert tier == "small"
+        assert response_schema is FlatSectionOutput
+        return FlatSectionOutput(
+            claims=[
+                FlatClaim(
+                    claim_id="eval_restate",
+                    claim_type=ClaimType.method.value,
+                    statement="PagedAttention maps logical blocks to physical blocks with a block table.",
+                    entity_names=["PagedAttention"],
+                ),
+                FlatClaim(
+                    claim_id="eval_finding",
+                    claim_type=ClaimType.result.value,
+                    statement="vLLM improves throughput by 2.4x over FasterTransformer on OPT-13B.",
+                    evidence_ids=["Table 2"],
+                    entity_names=["vLLM", "FasterTransformer", "OPT-13B"],
+                ),
+            ]
+        )
+
+    monkeypatch.setattr(section_prompts, "call_model", _fake_call_model)
+    artifacts = [
+        EvidenceArtifact(artifact_type="table", artifact_id="Table 2", caption="Throughput results.", source_page=8),
+    ]
+    output = asyncio.run(extract_section_claims(section, [], artifacts, {"pipeline": {"section_extraction": {}}}))
+
+    ids = {claim.claim_id for claim in output.claims}
+    assert ids == {"eval_finding"}
+    assert output.claims[0].claim_type == ClaimType.result
 
 
 @pytest.mark.api
