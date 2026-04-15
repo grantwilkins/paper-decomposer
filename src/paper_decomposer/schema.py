@@ -203,6 +203,24 @@ class ParentPreference(str, Enum):
     none = "none"
 
 
+class SupportDetailType(str, Enum):
+    implementation_fact = "implementation_fact"
+    procedural_step = "procedural_step"
+    api_surface = "api_surface"
+    framework_dependency = "framework_dependency"
+    local_kernel_optimization = "local_kernel_optimization"
+    numeric_support = "numeric_support"
+
+
+class SupportRelationshipType(str, Enum):
+    implements = "implements"
+    instantiates = "instantiates"
+    measures = "measures"
+    uses_framework = "uses_framework"
+    local_optimization_of = "local_optimization_of"
+    operational_context = "operational_context"
+
+
 class RhetoricalRole(str, Enum):
     abstract = "abstract"
     introduction = "introduction"
@@ -307,6 +325,116 @@ class RawClaim(BaseModel):
     rejected_why: str | None = None
     # Internal pipeline hinting; excluded from serialized final output.
     structural_hints: ClaimStructuralHints | None = Field(default=None, exclude=True)
+    # Internal estimate of how likely this is to be a real argumentative node.
+    claim_strength: float | None = Field(default=None, exclude=True)
+
+
+class SectionArgumentCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: str
+    claim_type: ClaimType
+    statement: str
+    source_section: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+    entity_names: list[str] = Field(default_factory=list)
+    rejected_what: str | None = None
+    rejected_why: str | None = None
+    elaborates_seed_id: str | None = None
+    local_role: ClaimLocalRole | None = None
+    preferred_parent_type: ParentPreference | None = None
+    strength: float | None = None
+
+    @field_validator("evidence_ids", mode="before")
+    @classmethod
+    def _normalize_evidence_ids(cls, value: Any) -> Any:
+        return _coerce_string_list(value)
+
+    @field_validator("entity_names", mode="before")
+    @classmethod
+    def _normalize_entity_names(cls, value: Any) -> Any:
+        return _coerce_string_list(value)
+
+    @field_validator("statement", mode="before")
+    @classmethod
+    def _normalize_statement(cls, value: Any) -> Any:
+        return _coerce_string(value)
+
+    @field_validator("source_section", mode="before")
+    @classmethod
+    def _normalize_source_section(cls, value: Any) -> Any:
+        return _coerce_string(value)
+
+    @field_validator("elaborates_seed_id", mode="before")
+    @classmethod
+    def _normalize_seed_id(cls, value: Any) -> Any:
+        return _coerce_optional_string(value)
+
+    @field_validator("rejected_what", "rejected_why", mode="before")
+    @classmethod
+    def _normalize_rejected(cls, value: Any) -> Any:
+        return _coerce_optional_string(value)
+
+
+class SupportDetail(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    support_detail_id: str
+    detail_type: SupportDetailType
+    text: str
+    source_section: str = ""
+    anchor_claim_id: str | None = None
+    candidate_anchor_ids: list[str] = Field(default_factory=list)
+    relationship_type: SupportRelationshipType
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    evidence_ids: list[str] = Field(default_factory=list)
+    promotable: bool = False
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def _normalize_text(cls, value: Any) -> Any:
+        return _coerce_string(value)
+
+    @field_validator("source_section", mode="before")
+    @classmethod
+    def _normalize_source_section(cls, value: Any) -> Any:
+        return _coerce_string(value)
+
+    @field_validator("anchor_claim_id", mode="before")
+    @classmethod
+    def _normalize_anchor_id(cls, value: Any) -> Any:
+        return _coerce_optional_string(value)
+
+    @field_validator("candidate_anchor_ids", "evidence_ids", mode="before")
+    @classmethod
+    def _normalize_lists(cls, value: Any) -> Any:
+        return _coerce_string_list(value)
+
+
+class SectionDigestOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    argument_candidates: list[SectionArgumentCandidate] = Field(default_factory=list)
+    support_details: list[SupportDetail] = Field(default_factory=list)
+
+
+class PaperSkeletonCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    context_roots: list[RawClaim] = Field(default_factory=list)
+    core_methods: list[RawClaim] = Field(default_factory=list)
+    topline_results: list[RawClaim] = Field(default_factory=list)
+    assumptions: list[RawClaim] = Field(default_factory=list)
+    negatives: list[RawClaim] = Field(default_factory=list)
+
+    def claims(self) -> list[RawClaim]:
+        return [
+            *self.context_roots,
+            *self.core_methods,
+            *self.topline_results,
+            *self.assumptions,
+            *self.negatives,
+        ]
 
 
 # Flat API response schemas (no nesting, no $refs).
@@ -763,6 +891,12 @@ class TreeAssemblyOutput(BaseModel):
     nodes: list[TreeNodeAssignment] = Field(default_factory=list)
 
 
+class AmbiguityResolutionOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    nodes: list[TreeNodeAssignment] = Field(default_factory=list)
+
+
 class PaperDecomposition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -770,6 +904,7 @@ class PaperDecomposition(BaseModel):
     one_liner: OneLiner
     claim_tree: list[ClaimNode] = Field(default_factory=list)
     negative_claims: list[RawClaim] = Field(default_factory=list)
+    support_details: list[SupportDetail] = Field(default_factory=list)
     all_artifacts: list[EvidenceArtifact] = Field(default_factory=list)
     extraction_cost_usd: float = 0.0
 
@@ -788,6 +923,8 @@ __all__ = [
     "ClaimType",
     "ClaimLocalRole",
     "ParentPreference",
+    "SupportDetailType",
+    "SupportRelationshipType",
     "RhetoricalRole",
     "InterventionType",
     "ScopeOfChange",
@@ -800,6 +937,10 @@ __all__ = [
     "EvidencePointer",
     "ClaimStructuralHints",
     "RawClaim",
+    "SectionArgumentCandidate",
+    "SupportDetail",
+    "SectionDigestOutput",
+    "PaperSkeletonCandidate",
     "FlatClaim",
     "FlatSeedOutput",
     "FlatSectionOutput",
@@ -829,5 +970,6 @@ __all__ = [
     "OneLiner",
     "TreeNodeAssignment",
     "TreeAssemblyOutput",
+    "AmbiguityResolutionOutput",
     "PaperDecomposition",
 ]

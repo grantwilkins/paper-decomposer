@@ -14,11 +14,17 @@ from ..schema import (
     FlatClaim,
     FlatSectionOutput,
     ModelTier,
+    PaperSkeletonCandidate,
     ParentPreference,
     RhetoricalRole,
     RawClaim,
     Section,
+    SectionArgumentCandidate,
+    SectionDigestOutput,
     SectionExtractionOutput,
+    SupportDetail,
+    SupportDetailType,
+    SupportRelationshipType,
 )
 
 call_model = call_model_with_fallback
@@ -206,6 +212,34 @@ _NEGATIVE_CUE_RE = re.compile(
     r"(fail|failed|fails|rejected|reject|limitation|cannot|can't|does not work|too expensive|non-applicable)",
     re.IGNORECASE,
 )
+# Observation/constraint patterns: statements characterising properties, proportions,
+# or capabilities without the paper actively doing anything.  These should default to
+# context or result, never method.
+_OBSERVATION_CONSTRAINT_RE = re.compile(
+    r"""
+    \bis\s+\w+[-\s]bound\b              # "is memory-bound", "is I/O-bound"
+    | \bare\s+\w+[-\s]bound\b           # plural: "are bandwidth-bound"
+    | \bgrows?\b.{0,50}\bwith\b         # "grows quickly with N"
+    | \bgrow\s+(linearly|quadratically|quickly|rapidly|significantly|exponentially)\b
+    | \bcan\s+(be\s+)?shared?\b         # "can share", "can be shared"
+    | \baccounts?\s+for\b               # "accounts for X%"
+    | \brepresents?\s+\S+\s+of\b       # "represents 30% of"
+    | \btends?\s+to\s+(grow|increase|decrease|dominate|bottleneck)\b
+    | \b(is|are)\s+(often|typically|generally|usually|mostly|primarily)\s+
+      (dominated|limited|bounded|constrained|determined|bottlenecked)\b
+    | \b(often|typically|generally|usually)\s+(dominated|limited|bounded|constrained)\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+# Active-agency verbs: the paper / system is constructing or proposing something.
+# Presence of this pattern confirms a claim is genuinely method-like even when the
+# statement also contains observational language.
+_ACTIVE_METHOD_AGENCY_RE = re.compile(
+    r"\bwe\s+(introduce|propose|present|design|build|implement|allocate|partition|schedule|develop|create|extend|leverage|employ)\b"
+    r"|\bour\s+(system|approach|framework|method|design|scheme|algorithm|technique|work)\b"
+    r"|\bthis\s+(paper|work)\s+(introduce|propose|present|describe|design|develop)\b",
+    re.IGNORECASE,
+)
 _PROCEDURAL_VERB_RE = re.compile(
     r"(select|allocate|fetch|gather|store|write|read|concatenate|append|schedule|update|dispatch|iterate|lookup)",
     re.IGNORECASE,
@@ -269,6 +303,11 @@ _STOPWORDS = {
     "to",
     "we",
     "with",
+}
+_NON_PROMOTABLE_SUPPORT_TYPES = {
+    SupportDetailType.procedural_step,
+    SupportDetailType.api_surface,
+    SupportDetailType.framework_dependency,
 }
 
 
@@ -492,6 +531,19 @@ def _retag_claim_type(claim_type: ClaimType, statement: str, role: RhetoricalRol
         RhetoricalRole.evaluation,
     }:
         return ClaimType.assumption
+
+    # Demote method → context for purely observational/characterisation claims before
+    # any section-role promotion runs.  A genuine method claim must describe the paper
+    # actively doing something.  Statements like "X is memory-bound", "Y grows with N",
+    # "Z can share …", "W accounts for …%" carry no method semantics — they are
+    # contextual observations or bottleneck facts regardless of what section they appear in.
+    # Guard: only fires when no mechanism-action vocabulary is present AND no
+    # paper-agency construction is detected, so legitimate method claims are unaffected.
+    if claim_type == ClaimType.method and not has_method:
+        is_observation = bool(_OBSERVATION_CONSTRAINT_RE.search(lowered))
+        has_agency = bool(_ACTIVE_METHOD_AGENCY_RE.search(lowered))
+        if is_observation and not has_agency:
+            return ClaimType.context
 
     if role in {RhetoricalRole.evaluation, RhetoricalRole.appendix}:
         if claim_type in {ClaimType.method, ClaimType.context, ClaimType.assumption} and has_result:
@@ -823,6 +875,10 @@ def _claim_worthiness_score(claim: RawClaim, section: Section) -> float:
     return score
 
 
+def _with_claim_strength(claim: RawClaim, section: Section) -> RawClaim:
+    return claim.model_copy(update={"claim_strength": _claim_worthiness_score(claim, section)})
+
+
 def _worth_score_threshold(section: Section, stage: str) -> float:
     if _is_implementation_section(section):
         return 1.8 if stage == "pre" else 2.8
@@ -836,7 +892,10 @@ def _worth_score_threshold(section: Section, stage: str) -> float:
 def _should_keep_claim_for_stage(claim: RawClaim, section: Section, stage: str) -> bool:
     if _matches_hard_suppression_pattern(claim):
         return False
-    if _claim_worthiness_score(claim, section) < _worth_score_threshold(section, stage):
+    strength = claim.claim_strength
+    if strength is None:
+        strength = _claim_worthiness_score(claim, section)
+    if strength < _worth_score_threshold(section, stage):
         return False
     if stage == "post" and not _passes_section_role_gate(claim, section):
         return False
@@ -870,6 +929,122 @@ def _compact_section_claims(claims: list[RawClaim], seed_claims: list[RawClaim])
     return compacted
 
 
+def _to_section_argument_candidate(claim: RawClaim) -> SectionArgumentCandidate:
+    hints = claim.structural_hints
+    return SectionArgumentCandidate(
+        claim_id=claim.claim_id,
+        claim_type=claim.claim_type,
+        statement=claim.statement,
+        source_section=claim.source_section,
+        evidence_ids=[pointer.artifact_id for pointer in claim.evidence if pointer.artifact_id.strip()],
+        entity_names=list(claim.entity_names),
+        rejected_what=claim.rejected_what,
+        rejected_why=claim.rejected_why,
+        elaborates_seed_id=hints.elaborates_seed_id if hints is not None else None,
+        local_role=hints.local_role if hints is not None else None,
+        preferred_parent_type=hints.preferred_parent_type if hints is not None else None,
+        strength=claim.claim_strength,
+    )
+
+
+def _infer_support_detail_type(claim: RawClaim, section: Section) -> SupportDetailType:
+    lowered = claim.statement.lower()
+    if _API_SURFACE_RE.search(lowered):
+        return SupportDetailType.api_surface
+    if _FRAMEWORK_USAGE_RE.search(lowered):
+        return SupportDetailType.framework_dependency
+    if _is_procedural_method_claim(claim):
+        return SupportDetailType.procedural_step
+    if _has_evaluation_finding_signal(claim):
+        return SupportDetailType.numeric_support
+    if re.search(r"\b(kernel|warp|cuda|coalesced|latency overhead)\b", lowered):
+        return SupportDetailType.local_kernel_optimization
+    if _is_implementation_section(section) or claim.claim_type == ClaimType.method:
+        return SupportDetailType.implementation_fact
+    return SupportDetailType.numeric_support
+
+
+def _relationship_for_support_type(detail_type: SupportDetailType) -> SupportRelationshipType:
+    mapping = {
+        SupportDetailType.implementation_fact: SupportRelationshipType.implements,
+        SupportDetailType.procedural_step: SupportRelationshipType.operational_context,
+        SupportDetailType.api_surface: SupportRelationshipType.instantiates,
+        SupportDetailType.framework_dependency: SupportRelationshipType.uses_framework,
+        SupportDetailType.local_kernel_optimization: SupportRelationshipType.local_optimization_of,
+        SupportDetailType.numeric_support: SupportRelationshipType.measures,
+    }
+    return mapping[detail_type]
+
+
+def _support_confidence(claim: RawClaim) -> float:
+    strength = claim.claim_strength if claim.claim_strength is not None else 0.0
+    normalized = max(0.0, min(1.0, strength / 6.0))
+    return round(normalized, 3)
+
+
+def _claim_to_support_detail(claim: RawClaim, section: Section, index: int) -> SupportDetail:
+    detail_type = _infer_support_detail_type(claim, section)
+    hints = claim.structural_hints
+    anchor_id = hints.elaborates_seed_id if hints is not None else None
+    candidate_anchor_ids = [anchor_id] if anchor_id else []
+    return SupportDetail(
+        support_detail_id=f"SD_{section.section_number or section.title}_{index}".replace(" ", "_"),
+        detail_type=detail_type,
+        text=claim.statement,
+        source_section=claim.source_section,
+        anchor_claim_id=anchor_id,
+        candidate_anchor_ids=candidate_anchor_ids,
+        relationship_type=_relationship_for_support_type(detail_type),
+        confidence=_support_confidence(claim),
+        evidence_ids=[pointer.artifact_id for pointer in claim.evidence if pointer.artifact_id.strip()],
+        promotable=detail_type not in _NON_PROMOTABLE_SUPPORT_TYPES,
+    )
+
+
+def _is_argument_candidate(claim: RawClaim, section: Section) -> bool:
+    if _matches_hard_suppression_pattern(claim):
+        return False
+    if not _passes_section_role_gate(claim, section):
+        return False
+
+    if claim.claim_type in {ClaimType.context, ClaimType.result, ClaimType.assumption, ClaimType.negative}:
+        return True
+
+    # For METHOD claims, require argumentative force beyond local operation details.
+    if claim.claim_type == ClaimType.method:
+        if _has_key_systems_choice_signal(claim):
+            return True
+        if _has_invariant_or_tradeoff_signal(claim):
+            return True
+        if _has_evaluation_finding_signal(claim):
+            return True
+        return bool(claim.structural_hints and claim.structural_hints.local_role == ClaimLocalRole.top_level)
+
+    return False
+
+
+async def extract_section_digest(
+    section: Section,
+    skeleton: PaperSkeletonCandidate,
+    artifacts: list[EvidenceArtifact],
+    config: Any,
+) -> SectionDigestOutput:
+    extraction = await extract_section_claims(section, skeleton.claims(), artifacts, config)
+    argument_candidates: list[SectionArgumentCandidate] = []
+    support_details: list[SupportDetail] = []
+
+    for idx, claim in enumerate(extraction.claims, start=1):
+        if _is_argument_candidate(claim, section):
+            argument_candidates.append(_to_section_argument_candidate(claim))
+            continue
+        support_details.append(_claim_to_support_detail(claim, section, idx))
+
+    return SectionDigestOutput(
+        argument_candidates=argument_candidates,
+        support_details=support_details,
+    )
+
+
 async def extract_section_claims(
     section: Section,
     seed_claims: list[RawClaim],
@@ -899,13 +1074,17 @@ async def extract_section_claims(
             )
         except Exception:
             continue
+        normalized = _with_claim_strength(normalized, section)
         if not _should_keep_claim_for_stage(normalized, section, stage="pre"):
             continue
         normalized_claims.append(normalized)
 
     postprocessed_claims: list[RawClaim] = []
     for claim in normalized_claims:
-        processed = _postprocess_claim(claim, section=section, seed_claims=seed_claims)
+        processed = _with_claim_strength(
+            _postprocess_claim(claim, section=section, seed_claims=seed_claims),
+            section,
+        )
         if not _should_keep_claim_for_stage(processed, section, stage="post"):
             continue
         postprocessed_claims.append(processed)
@@ -921,5 +1100,6 @@ __all__ = [
     "UNKNOWN_SECTION_INSTRUCTIONS",
     "get_instructions_for_role",
     "build_section_prompt",
+    "extract_section_digest",
     "extract_section_claims",
 ]

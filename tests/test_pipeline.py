@@ -21,10 +21,11 @@ from paper_decomposer.schema import (
     PaperDecomposition,
     PaperDocument,
     PaperMetadata,
+    PaperSkeletonCandidate,
     RawClaim,
     Section,
-    SectionExtractionOutput,
-    SeedOutput,
+    SectionArgumentCandidate,
+    SectionDigestOutput,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -150,7 +151,10 @@ def test_pipeline_aborts_when_preflight_fails(monkeypatch: pytest.MonkeyPatch, t
         asyncio.run(decompose_paper(str(fake_pdf), "ignored.yaml"))
 
 
-def test_pipeline_aborts_on_zero_phase2_claims(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_pipeline_handles_zero_phase2_candidates_with_skeleton_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     fake_pdf = tmp_path / "paper.pdf"
     fake_pdf.write_bytes(b"%PDF-1.4")
 
@@ -182,27 +186,34 @@ def test_pipeline_aborts_on_zero_phase2_claims(monkeypatch: pytest.MonkeyPatch, 
     async def _ok_preflight(*args, **kwargs):
         return None
 
-    async def _seed(*args, **kwargs):
-        return SeedOutput(
-            claims=[
+    async def _skeleton(*args, **kwargs):
+        _ = (args, kwargs)
+        return PaperSkeletonCandidate(
+            context_roots=[
                 RawClaim(
                     claim_id="s1",
                     claim_type=ClaimType.context,
                     statement="Need better memory management.",
                     source_section="Abstract",
                 )
-            ]
+            ],
+            core_methods=[],
+            topline_results=[],
+            assumptions=[],
+            negatives=[],
         )
 
-    async def _empty_section(*args, **kwargs):
-        return SectionExtractionOutput(claims=[])
+    async def _empty_digest(*args, **kwargs):
+        _ = (args, kwargs)
+        return SectionDigestOutput(argument_candidates=[], support_details=[])
 
     monkeypatch.setattr(pipeline_module, "preflight_model_tiers", _ok_preflight)
-    monkeypatch.setattr(pipeline_module, "extract_seed", _seed)
-    monkeypatch.setattr(pipeline_module, "extract_section_claims", _empty_section)
+    monkeypatch.setattr(pipeline_module, "extract_skeleton", _skeleton)
+    monkeypatch.setattr(pipeline_module, "extract_section_digest", _empty_digest)
 
-    with pytest.raises(RuntimeError, match="zero claims"):
-        asyncio.run(decompose_paper(str(fake_pdf), "ignored.yaml"))
+    result = asyncio.run(decompose_paper(str(fake_pdf), "ignored.yaml"))
+    assert isinstance(result, PaperDecomposition)
+    assert len(result.claim_tree) == 1
 
 
 def test_pipeline_passes_deduplicated_negatives_to_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -257,13 +268,35 @@ def test_pipeline_passes_deduplicated_negatives_to_tree(monkeypatch: pytest.Monk
         _ = (args, kwargs)
         return None
 
-    async def _seed(*args, **kwargs):
+    async def _skeleton(*args, **kwargs):
         _ = (args, kwargs)
-        return SeedOutput(claims=[seed_context])
+        return PaperSkeletonCandidate(
+            context_roots=[seed_context],
+            core_methods=[],
+            topline_results=[],
+            assumptions=[],
+            negatives=[],
+        )
 
     async def _section(*args, **kwargs):
         _ = (args, kwargs)
-        return SectionExtractionOutput(claims=[negative_a, negative_b])
+        return SectionDigestOutput(
+            argument_candidates=[
+                SectionArgumentCandidate(
+                    claim_id=negative_a.claim_id,
+                    claim_type=negative_a.claim_type,
+                    statement=negative_a.statement,
+                    source_section=negative_a.source_section,
+                ),
+                SectionArgumentCandidate(
+                    claim_id=negative_b.claim_id,
+                    claim_type=negative_b.claim_type,
+                    statement=negative_b.statement,
+                    source_section=negative_b.source_section,
+                ),
+            ],
+            support_details=[],
+        )
 
     async def _dedup(*args, **kwargs):
         _ = (args, kwargs)
@@ -280,8 +313,9 @@ def test_pipeline_passes_deduplicated_negatives_to_tree(monkeypatch: pytest.Monk
         artifacts,
         config,
         claim_groups,
+        support_details,
     ):
-        _ = (faceted, artifacts, config)
+        _ = (faceted, artifacts, config, support_details)
         captured["claims"] = list(claims)
         captured["negatives"] = list(negatives)
         captured["claim_groups"] = list(claim_groups or [])
@@ -295,10 +329,10 @@ def test_pipeline_passes_deduplicated_negatives_to_tree(monkeypatch: pytest.Monk
         )
 
     monkeypatch.setattr(pipeline_module, "preflight_model_tiers", _ok_preflight)
-    monkeypatch.setattr(pipeline_module, "extract_seed", _seed)
-    monkeypatch.setattr(pipeline_module, "extract_section_claims", _section)
-    monkeypatch.setattr(pipeline_module, "chunked_dedup", _dedup)
-    monkeypatch.setattr(pipeline_module, "assemble_tree", _assemble_tree)
+    monkeypatch.setattr(pipeline_module, "extract_skeleton", _skeleton)
+    monkeypatch.setattr(pipeline_module, "extract_section_digest", _section)
+    monkeypatch.setattr(pipeline_module, "hybrid_dedup_promoted", _dedup)
+    monkeypatch.setattr(pipeline_module, "assemble_tree_deterministic", _assemble_tree)
 
     _ = asyncio.run(decompose_paper(str(fake_pdf), "ignored.yaml"))
 

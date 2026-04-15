@@ -80,6 +80,9 @@ _STOPWORDS = {
     "with",
 }
 _PLACEHOLDER_SOURCE_HINTS = {"abstract", "seed", "summary", "overview"}
+_UNCERTAIN_SIMILARITY_MIN = 0.42
+_UNCERTAIN_SIMILARITY_MAX = 0.83
+_SEMANTIC_NODE_CAP_DEFAULT = 15
 
 
 def _resolve_model_tier(config: Any) -> ModelTier:
@@ -104,6 +107,28 @@ def _resolve_model_tier(config: Any) -> ModelTier:
                     return cast(ModelTier, tier)
 
     return "medium"
+
+
+def _get_semantic_node_cap(config: Any) -> int:
+    value: Any = None
+
+    pipeline = getattr(config, "pipeline", None)
+    if pipeline is not None:
+        dedup_cfg = getattr(pipeline, "dedup", None)
+        if isinstance(dedup_cfg, Mapping):
+            value = dedup_cfg.get("semantic_node_cap")
+
+    if value is None and isinstance(config, Mapping):
+        pipeline_cfg = config.get("pipeline")
+        if isinstance(pipeline_cfg, Mapping):
+            dedup_cfg = pipeline_cfg.get("dedup")
+            if isinstance(dedup_cfg, Mapping):
+                value = dedup_cfg.get("semantic_node_cap")
+
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return _SEMANTIC_NODE_CAP_DEFAULT
 
 
 def _format_claim_line(idx: int, claim: RawClaim) -> str:
@@ -233,6 +258,141 @@ def _is_near_duplicate(left: RawClaim, right: RawClaim) -> bool:
     if coverage >= 0.9:
         return True
     return containment and coverage >= 0.75
+
+
+def _pair_similarity(left: RawClaim, right: RawClaim) -> float:
+    if left.claim_type != right.claim_type:
+        return 0.0
+
+    left_tokens = _claim_tokens(left.statement)
+    right_tokens = _claim_tokens(right.statement)
+    if not left_tokens or not right_tokens:
+        return 0.0
+
+    overlap = left_tokens & right_tokens
+    union = left_tokens | right_tokens
+    if not overlap or not union:
+        return 0.0
+
+    jaccard = len(overlap) / len(union)
+    coverage = len(overlap) / min(len(left_tokens), len(right_tokens))
+    numbers_left = _statement_numbers(left.statement)
+    numbers_right = _statement_numbers(right.statement)
+    number_bonus = 0.0
+    if numbers_left and numbers_right and not numbers_left.isdisjoint(numbers_right):
+        number_bonus = 0.08
+    return min(1.0, 0.65 * jaccard + 0.35 * coverage + number_bonus)
+
+
+def _deterministic_canonicalize_promoted(
+    claims: list[RawClaim],
+) -> tuple[list[RawClaim], list[ClaimGroup], set[str]]:
+    if not claims:
+        return [], [], set()
+
+    parent = list(range(len(claims)))
+
+    def find(idx: int) -> int:
+        while parent[idx] != idx:
+            parent[idx] = parent[parent[idx]]
+            idx = parent[idx]
+        return idx
+
+    def union(left_idx: int, right_idx: int) -> None:
+        root_left = find(left_idx)
+        root_right = find(right_idx)
+        if root_left == root_right:
+            return
+        parent[root_right] = root_left
+
+    for left_idx in range(len(claims)):
+        for right_idx in range(left_idx + 1, len(claims)):
+            if _is_near_duplicate(claims[left_idx], claims[right_idx]):
+                union(left_idx, right_idx)
+
+    clusters: dict[int, list[RawClaim]] = defaultdict(list)
+    for idx, claim in enumerate(claims):
+        clusters[find(idx)].append(claim)
+
+    canonical_claims: list[RawClaim] = []
+    groups: list[ClaimGroup] = []
+    for member_claims in clusters.values():
+        canonical = max(member_claims, key=_canonical_score)
+        member_ids = sorted(
+            {
+                claim.claim_id
+                for claim in member_claims
+                if claim.claim_id != canonical.claim_id
+            }
+        )
+        canonical_claims.append(canonical)
+        groups.append(
+            ClaimGroup(
+                canonical_id=canonical.claim_id,
+                member_ids=member_ids,
+                parent_id=None,
+            )
+        )
+
+    canonical_claims = sorted(canonical_claims, key=lambda claim: claims.index(claim))
+
+    uncertain_ids: set[str] = set()
+    for left_idx in range(len(canonical_claims)):
+        for right_idx in range(left_idx + 1, len(canonical_claims)):
+            left = canonical_claims[left_idx]
+            right = canonical_claims[right_idx]
+            if left.claim_type != right.claim_type:
+                continue
+            if _is_near_duplicate(left, right):
+                continue
+            similarity = _pair_similarity(left, right)
+            if _UNCERTAIN_SIMILARITY_MIN <= similarity <= _UNCERTAIN_SIMILARITY_MAX:
+                uncertain_ids.add(left.claim_id)
+                uncertain_ids.add(right.claim_id)
+
+    return canonical_claims, groups, uncertain_ids
+
+
+async def _semantic_disambiguate_uncertain_clusters(
+    original_claims: list[RawClaim],
+    deterministic_groups: list[ClaimGroup],
+    uncertain_ids: set[str],
+    config: Any,
+) -> tuple[list[RawClaim], list[ClaimGroup]]:
+    if not uncertain_ids:
+        normalized = _normalize_groups(deterministic_groups)
+        return apply_dedup(original_claims, DedupOutput(groups=normalized)), normalized
+
+    semantic_cap_raw = _get_semantic_node_cap(config)
+    if len(uncertain_ids) > semantic_cap_raw:
+        normalized = _normalize_groups(deterministic_groups)
+        return apply_dedup(original_claims, DedupOutput(groups=normalized)), normalized
+
+    by_type: dict[str, list[RawClaim]] = defaultdict(list)
+    original_by_id = {claim.claim_id: claim for claim in original_claims}
+    for claim_id in sorted(uncertain_ids):
+        claim = original_by_id.get(claim_id)
+        if claim is None:
+            continue
+        by_type[claim.claim_type.value].append(claim)
+
+    semantic_groups: list[ClaimGroup] = []
+    for claim_type, claims in by_type.items():
+        if len(claims) <= 1:
+            continue
+        try:
+            batch_result = await dedup_type_batch(claims, claim_type, config)
+            semantic_groups.extend(batch_result.groups)
+        except Exception:
+            continue
+
+    if not semantic_groups:
+        normalized = _normalize_groups(deterministic_groups)
+        return apply_dedup(original_claims, DedupOutput(groups=normalized)), normalized
+
+    merged = _canonicalize_groups([*deterministic_groups, *semantic_groups], original_by_id)
+    normalized = _normalize_groups(merged)
+    return apply_dedup(original_claims, DedupOutput(groups=normalized)), normalized
 
 
 def _collapse_residual_duplicates(claims: list[RawClaim]) -> tuple[list[RawClaim], list[ClaimGroup]]:
@@ -723,6 +883,31 @@ async def chunked_dedup(
     return deduped_canonical, normalized_final_groups
 
 
+async def hybrid_dedup_promoted(
+    promoted_claims: list[RawClaim],
+    config: Any,
+) -> tuple[list[RawClaim], list[ClaimGroup]]:
+    if not promoted_claims:
+        return [], []
+
+    deterministic_claims, deterministic_groups, uncertain_ids = _deterministic_canonicalize_promoted(promoted_claims)
+    deterministic_claim_by_id = {claim.claim_id: claim for claim in deterministic_claims}
+    normalized_det_groups = _canonicalize_groups(deterministic_groups, deterministic_claim_by_id)
+
+    resolved_claims, resolved_groups = await _semantic_disambiguate_uncertain_clusters(
+        deterministic_claims,
+        normalized_det_groups,
+        uncertain_ids,
+        config,
+    )
+
+    claim_by_id = {claim.claim_id: claim for claim in deterministic_claims}
+    merged_groups = _canonicalize_groups(resolved_groups, claim_by_id)
+    normalized_groups = _normalize_groups(merged_groups)
+    deduped_claims = apply_dedup(deterministic_claims, DedupOutput(groups=normalized_groups))
+    return deduped_claims, normalized_groups
+
+
 async def deduplicate_claims(claims: list[RawClaim], config: Any) -> DedupOutput:
     _, groups = await chunked_dedup(claims, config)
     return DedupOutput(groups=groups)
@@ -738,5 +923,6 @@ __all__ = [
     "apply_dedup",
     "dedup_type_batch",
     "chunked_dedup",
+    "hybrid_dedup_promoted",
     "deduplicate_claims",
 ]

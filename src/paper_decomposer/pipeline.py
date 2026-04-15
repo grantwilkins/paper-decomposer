@@ -12,11 +12,16 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn
 from .config import load_config
 from .models import get_cost_tracker, preflight_model_tiers, reset_cost_tracker
 from .pdf_parser import parse_pdf
-from .prompts.dedup import chunked_dedup
+from .prompts.dedup import chunked_dedup, hybrid_dedup_promoted
 from .prompts.facets import extract_facets
-from .prompts.seed import extract_seed
-from .prompts.section import extract_section_claims
-from .prompts.tree import assemble_tree
+from .prompts.seed import extract_seed, extract_skeleton, repair_skeleton
+from .prompts.section import (
+    _claim_worthiness_score,
+    _worth_score_threshold,
+    extract_section_claims,
+    extract_section_digest,
+)
+from .prompts.tree import assemble_tree, assemble_tree_deterministic
 from .schema import (
     ClaimGroup,
     ClaimLocalRole,
@@ -28,9 +33,12 @@ from .schema import (
     OneLiner,
     PaperDecomposition,
     PaperDocument,
+    PaperSkeletonCandidate,
     ParentPreference,
     RawClaim,
+    SectionArgumentCandidate,
     Section,
+    SupportDetail,
 )
 
 console = Console()
@@ -103,6 +111,104 @@ def _claim_quality_score(claim: RawClaim) -> tuple[int, int, int]:
     entity_score = len({entity.strip().lower() for entity in claim.entity_names if entity.strip()})
     token_score = len(_statement_tokens(claim.statement))
     return evidence_score, entity_score, token_score
+
+
+def _fallback_claim_strength(claim: RawClaim) -> float:
+    evidence_score, entity_score, token_score = _claim_quality_score(claim)
+    lowered = _collapse_ws(claim.statement).lower()
+
+    score = float(token_score) / 4.0
+    score += float(evidence_score)
+    score += float(min(entity_score, 2)) * 0.6
+
+    if claim.claim_type in {ClaimType.result, ClaimType.assumption, ClaimType.negative}:
+        score += 1.0
+    elif claim.claim_type == ClaimType.context:
+        score += 0.4
+
+    if _RESULT_HINT_RE.search(lowered):
+        score += 1.0
+    if _METHOD_HINT_RE.search(lowered):
+        score += 0.8
+    if _CONTEXT_HINT_RE.search(lowered):
+        score += 0.4
+
+    return score
+
+
+def _refined_claim_strength(claim: RawClaim, source: Section | str) -> float:
+    score = (
+        _claim_worthiness_score(claim, source)
+        if isinstance(source, Section)
+        else _fallback_claim_strength(claim)
+    )
+    hints = claim.structural_hints
+    if hints is not None:
+        if hints.local_role == ClaimLocalRole.top_level:
+            score += 0.8
+        elif hints.local_role == ClaimLocalRole.mechanism:
+            score += 0.3
+        elif hints.local_role == ClaimLocalRole.implementation_detail:
+            score -= 0.8
+        if hints.elaborates_seed_id and claim.claim_type == ClaimType.method:
+            score += 0.2
+    return round(score, 3)
+
+
+def _claim_strength_threshold(claim: RawClaim, source: Section | str) -> float:
+    if isinstance(source, Section):
+        threshold = _worth_score_threshold(source, stage="post")
+    elif claim.claim_type == ClaimType.method:
+        threshold = 2.4
+    elif claim.claim_type in {ClaimType.result, ClaimType.assumption, ClaimType.negative}:
+        threshold = 1.8
+    else:
+        threshold = 1.4
+
+    hints = claim.structural_hints
+    if claim.claim_type == ClaimType.method and hints is not None:
+        if hints.local_role == ClaimLocalRole.top_level:
+            threshold -= 0.6
+        elif hints.local_role == ClaimLocalRole.mechanism:
+            threshold -= 0.2
+        elif hints.local_role == ClaimLocalRole.implementation_detail:
+            threshold += 0.6
+    return threshold
+
+
+def _refine_tree_candidate_claims(claims: list[RawClaim], sections: list[Section]) -> list[RawClaim]:
+    refined_claims: list[RawClaim] = []
+    retained_method_ids: set[str] = set()
+    strongest_method_id: str | None = None
+    strongest_method_score = float("-inf")
+
+    for claim in claims:
+        source = _find_section_for_claim(claim, sections)
+        strength = _refined_claim_strength(claim, source)
+        refined_claim = claim.model_copy(update={"claim_strength": strength})
+        refined_claims.append(refined_claim)
+
+        if refined_claim.claim_type != ClaimType.method:
+            continue
+
+        if strength > strongest_method_score:
+            strongest_method_score = strength
+            strongest_method_id = refined_claim.claim_id
+
+        if strength >= _claim_strength_threshold(refined_claim, source):
+            retained_method_ids.add(refined_claim.claim_id)
+
+    if strongest_method_id is not None and not retained_method_ids:
+        retained_method_ids.add(strongest_method_id)
+
+    if strongest_method_id is None:
+        return refined_claims
+
+    return [
+        claim
+        for claim in refined_claims
+        if claim.claim_type != ClaimType.method or claim.claim_id in retained_method_ids
+    ]
 
 
 def _retag_claim_type(claim: RawClaim) -> ClaimType:
@@ -628,6 +734,279 @@ def _cost_delta(before: dict[str, float | int], after: dict[str, float | int]) -
     return float(after.get("total_cost_usd", 0.0)) - float(before.get("total_cost_usd", 0.0))
 
 
+def _read_promotion_float(config: Any, key: str, default: float) -> float:
+    pipeline = getattr(config, "pipeline", None)
+    section_cfg = getattr(pipeline, "section_extraction", None) if pipeline is not None else None
+    value: Any = None
+    if isinstance(section_cfg, dict):
+        promotion_cfg = section_cfg.get("promotion")
+        if isinstance(promotion_cfg, dict):
+            value = promotion_cfg.get(key)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _section_label_key(section: Section) -> str:
+    if section.section_number:
+        return f"{section.section_number} {section.title}".strip().lower()
+    return section.title.strip().lower()
+
+
+def _candidate_to_raw_claim(candidate: SectionArgumentCandidate) -> RawClaim:
+    hints = ClaimStructuralHints(
+        elaborates_seed_id=candidate.elaborates_seed_id,
+        local_role=candidate.local_role,
+        preferred_parent_type=candidate.preferred_parent_type,
+    )
+    return RawClaim(
+        claim_id=candidate.claim_id,
+        claim_type=candidate.claim_type,
+        statement=candidate.statement,
+        source_section=candidate.source_section,
+        evidence=[{"artifact_id": artifact_id, "role": "supports"} for artifact_id in candidate.evidence_ids],
+        entity_names=list(candidate.entity_names),
+        rejected_what=candidate.rejected_what,
+        rejected_why=candidate.rejected_why,
+        structural_hints=hints,
+        claim_strength=candidate.strength,
+    )
+
+
+def _claim_similarity(left: RawClaim, right: RawClaim) -> float:
+    left_tokens = _statement_tokens(left.statement)
+    right_tokens = _statement_tokens(right.statement)
+    if not left_tokens or not right_tokens:
+        return 0.0
+
+    overlap = len(left_tokens & right_tokens)
+    union = len(left_tokens | right_tokens)
+    token_sim = overlap / union if union else 0.0
+
+    left_entities = {entity.strip().lower() for entity in left.entity_names if entity.strip()}
+    right_entities = {entity.strip().lower() for entity in right.entity_names if entity.strip()}
+    entity_sim = 0.0
+    if left_entities and right_entities:
+        entity_sim = len(left_entities & right_entities) / max(1, len(left_entities | right_entities))
+
+    left_evidence = _evidence_ids(left)
+    right_evidence = _evidence_ids(right)
+    evidence_sim = 0.0
+    if left_evidence and right_evidence:
+        evidence_sim = len(left_evidence & right_evidence) / max(1, len(left_evidence | right_evidence))
+
+    return 0.6 * token_sim + 0.25 * entity_sim + 0.15 * evidence_sim
+
+
+def _type_compatibility(child: RawClaim, parent: RawClaim) -> float:
+    if child.claim_type == parent.claim_type:
+        return 1.0
+    allowed: dict[ClaimType, set[ClaimType]] = {
+        ClaimType.method: {ClaimType.context, ClaimType.method},
+        ClaimType.result: {ClaimType.method, ClaimType.result},
+        ClaimType.assumption: {ClaimType.method, ClaimType.result, ClaimType.context},
+        ClaimType.negative: {ClaimType.method, ClaimType.context},
+        ClaimType.context: {ClaimType.context},
+    }
+    return 1.0 if parent.claim_type in allowed.get(child.claim_type, set()) else 0.0
+
+
+def _anchor_match(candidate: RawClaim, anchors: list[RawClaim], source_by_section: dict[str, Section]) -> float:
+    best = 0.0
+    candidate_source = source_by_section.get(candidate.source_section.strip().lower())
+    for anchor in anchors:
+        type_score = _type_compatibility(candidate, anchor)
+        if type_score <= 0.0:
+            continue
+        similarity = _claim_similarity(candidate, anchor)
+        section_bonus = 0.0
+        if candidate_source is not None:
+            if anchor.source_section.strip().lower() == _section_label_key(candidate_source):
+                section_bonus = 0.2
+            elif candidate_source.role.value in {"method", "theory"} and anchor.claim_type == ClaimType.method:
+                section_bonus = 0.1
+            elif candidate_source.role.value in {"evaluation", "appendix"} and anchor.claim_type == ClaimType.result:
+                section_bonus = 0.1
+        best = max(best, min(1.0, 0.55 * type_score + 0.35 * similarity + section_bonus))
+    return best
+
+
+def _novelty(candidate: RawClaim, references: list[RawClaim]) -> float:
+    comparable = [reference for reference in references if reference.claim_type == candidate.claim_type]
+    if not comparable:
+        return 1.0
+    max_similarity = max((_claim_similarity(candidate, reference) for reference in comparable), default=0.0)
+    return max(0.0, 1.0 - max_similarity)
+
+
+def _strength(candidate: RawClaim, source_by_section: dict[str, Section]) -> float:
+    source = source_by_section.get(candidate.source_section.strip().lower(), candidate.source_section)
+    return _refined_claim_strength(candidate, source)
+
+
+def _necessity(
+    candidate: RawClaim,
+    promoted_claims: list[RawClaim],
+    skeleton: PaperSkeletonCandidate,
+) -> float:
+    if candidate.claim_type == ClaimType.context:
+        return 1.0
+
+    method_pool = [
+        claim
+        for claim in [*promoted_claims, *skeleton.core_methods]
+        if claim.claim_type == ClaimType.method and claim.claim_id != candidate.claim_id
+    ]
+    result_pool = [
+        claim
+        for claim in [*promoted_claims, *skeleton.topline_results]
+        if claim.claim_type == ClaimType.result and claim.claim_id != candidate.claim_id
+    ]
+
+    if candidate.claim_type == ClaimType.method:
+        if not result_pool:
+            return 0.35
+        return max((_claim_similarity(candidate, result) for result in result_pool), default=0.0)
+
+    if candidate.claim_type in {ClaimType.result, ClaimType.assumption, ClaimType.negative}:
+        if not method_pool:
+            return 0.25
+        return max((_claim_similarity(candidate, method) for method in method_pool), default=0.0)
+
+    return 0.2
+
+
+def _promote_argument_candidates(
+    candidates: list[SectionArgumentCandidate],
+    skeleton: PaperSkeletonCandidate,
+    sections: list[Section],
+    config: Any,
+) -> tuple[list[RawClaim], list[RawClaim], dict[str, float]]:
+    t_anchor = _read_promotion_float(config, "t_anchor", 0.55)
+    t_novel = _read_promotion_float(config, "t_novel", 0.40)
+    t_strength = _read_promotion_float(config, "t_strength", 2.2)
+    t_need = _read_promotion_float(config, "t_need", 0.25)
+
+    source_by_section = {_section_label_key(section): section for section in sections}
+    anchors = skeleton.claims()
+    promoted: list[RawClaim] = []
+    unmatched_high_strength: list[RawClaim] = []
+    diagnostics: dict[str, float] = {}
+
+    for candidate in candidates:
+        raw = _candidate_to_raw_claim(candidate)
+        anchor = _anchor_match(raw, anchors, source_by_section)
+        novelty = _novelty(raw, [*anchors, *promoted])
+        strength = _strength(raw, source_by_section)
+        need = _necessity(raw, promoted, skeleton)
+        raw = raw.model_copy(update={"claim_strength": round(strength, 3)})
+
+        admitted = anchor >= t_anchor or (novelty >= t_novel and strength >= t_strength and need >= t_need)
+        if admitted:
+            promoted.append(raw)
+        elif raw.claim_type == ClaimType.method and strength >= t_strength:
+            unmatched_high_strength.append(raw)
+
+        diagnostics[f"{raw.claim_id}:anchor"] = round(anchor, 3)
+        diagnostics[f"{raw.claim_id}:novelty"] = round(novelty, 3)
+        diagnostics[f"{raw.claim_id}:strength"] = round(strength, 3)
+        diagnostics[f"{raw.claim_id}:need"] = round(need, 3)
+
+    promoted = _normalize_claim_semantics(promoted)
+    promoted = _collapse_claim_duplicates(promoted)
+    promoted, unique_map = _uniquify_claim_ids(promoted)
+    promoted = _remap_structural_hint_ids(promoted, unique_map)
+    promoted, norm_map = _normalize_claim_id_scheme(promoted)
+    promoted = _remap_structural_hint_ids(promoted, norm_map)
+    return promoted, unmatched_high_strength, diagnostics
+
+
+def _needs_skeleton_repair(
+    promoted_claims: list[RawClaim],
+    unmatched_high_strength_methods: list[RawClaim],
+    skeleton: PaperSkeletonCandidate,
+) -> bool:
+    skeleton_ids = {claim.claim_id for claim in skeleton.claims()}
+    matched_promoted = [
+        claim
+        for claim in promoted_claims
+        if claim.structural_hints is not None
+        and claim.structural_hints.elaborates_seed_id is not None
+        and claim.structural_hints.elaborates_seed_id in skeleton_ids
+    ]
+    anchor_coverage = len(matched_promoted) / max(1, len(promoted_claims))
+
+    top_line_results = [
+        claim
+        for claim in promoted_claims
+        if claim.claim_type == ClaimType.result and (claim.claim_strength or 0.0) >= 2.6
+    ]
+    method_claims = [claim for claim in promoted_claims if claim.claim_type == ClaimType.method]
+    orphan_top_line_results = 0
+    for result in top_line_results:
+        if not method_claims:
+            orphan_top_line_results += 1
+            continue
+        affinity = max((_claim_similarity(result, method) for method in method_claims), default=0.0)
+        if affinity < 0.25:
+            orphan_top_line_results += 1
+    orphan_rate = orphan_top_line_results / max(1, len(top_line_results))
+
+    return (
+        anchor_coverage < 0.65
+        or orphan_rate > 0.30
+        or len(unmatched_high_strength_methods) >= 2
+    )
+
+
+def _attach_support_details(
+    support_details: list[SupportDetail],
+    claims: list[RawClaim],
+) -> list[SupportDetail]:
+    if not support_details:
+        return []
+    if not claims:
+        return support_details
+
+    claim_by_id = {claim.claim_id: claim for claim in claims}
+    remapped: list[SupportDetail] = []
+    for detail in support_details:
+        if detail.anchor_claim_id and detail.anchor_claim_id in claim_by_id:
+            remapped.append(detail)
+            continue
+
+        pseudo_claim = RawClaim(
+            claim_id=detail.support_detail_id,
+            claim_type=ClaimType.method,
+            statement=detail.text,
+            source_section=detail.source_section,
+            evidence=[{"artifact_id": evidence_id, "role": "supports"} for evidence_id in detail.evidence_ids],
+            entity_names=[],
+        )
+        scored = sorted(
+            ((claim, _claim_similarity(pseudo_claim, claim)) for claim in claims),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        candidate_ids = [claim.claim_id for claim, score in scored[:3] if score > 0.15]
+        anchor_id = candidate_ids[0] if candidate_ids else None
+        confidence = detail.confidence
+        if scored:
+            confidence = round(max(confidence, min(1.0, scored[0][1])), 3)
+
+        remapped.append(
+            detail.model_copy(
+                update={
+                    "anchor_claim_id": anchor_id,
+                    "candidate_anchor_ids": candidate_ids,
+                    "confidence": confidence,
+                }
+            )
+        )
+    return remapped
+
+
 async def _run_parallel_with_progress(
     items: list[T],
     *,
@@ -680,67 +1059,47 @@ async def decompose_paper(pdf_path: str, config_path: str = "config.yaml") -> Pa
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        parse_task = progress.add_task("Phase 0/5: Parse PDF", total=1)
+        parse_task = progress.add_task("Phase 0/6: Parse PDF", total=1)
         document = parse_pdf(str(pdf), config)
         progress.advance(parse_task)
 
         section_count = len(document.sections)
-        method_or_eval = [
-            section
-            for section in document.sections
-            if section.role.value in {"method", "theory", "evaluation"}
-        ]
-        has_abstract_or_intro = any(
-            section.role.value in {"abstract", "introduction"} for section in document.sections
-        )
-        if not has_abstract_or_intro:
-            console.print("[yellow]Warning:[/yellow] No abstract/introduction section detected.")
-        if not method_or_eval:
-            console.print("[yellow]Warning:[/yellow] No method/evaluation sections detected.")
-
         console.print(
             "Parsed "
             f"{section_count} sections and {len(document.all_artifacts)} artifacts "
             f"for '{document.metadata.title}'."
         )
 
-        preflight_task = progress.add_task("Phase 0b/5: Model preflight", total=1)
+        preflight_task = progress.add_task("Phase 0b/6: Model preflight", total=1)
         required_tiers = _required_preflight_tiers(config)
         await preflight_model_tiers(required_tiers, config=config)
         progress.advance(preflight_task)
         console.print(f"Preflight passed for tiers: {', '.join(required_tiers)}")
 
-        phase1_task = progress.add_task("Phase 1/5: Seed claims", total=1)
+        phase1_task = progress.add_task("Phase 1/6: Skeleton extraction", total=1)
         phase1_before = get_cost_tracker()
         seed_text = _find_seed_text(document)
-        seed_claims: list[RawClaim] = []
         try:
-            seed_output = await extract_seed(seed_text, config)
-            seed_claims = list(seed_output.claims)
+            skeleton = await extract_skeleton(seed_text, config)
         except Exception as exc:
-            console.print(f"[yellow]Seed extraction failed:[/yellow] {exc}")
-
-        if len(seed_claims) < 2:
-            intro_sections = [
-                section for section in document.sections if section.role.value == "introduction"
-            ]
-            if intro_sections:
-                retry_text = "\n\n".join(section.body_text for section in intro_sections)
-                if retry_text.strip() and retry_text.strip() != seed_text.strip():
-                    try:
-                        seed_retry = await extract_seed(retry_text, config)
-                        if len(seed_retry.claims) >= len(seed_claims):
-                            seed_claims = list(seed_retry.claims)
-                    except Exception as exc:
-                        console.print(f"[yellow]Seed retry failed:[/yellow] {exc}")
-
-        if not seed_claims:
-            console.print("[yellow]Proceeding without seed skeleton claims.[/yellow]")
-
+            console.print(f"[yellow]Skeleton extraction failed:[/yellow] {exc}")
+            seed_fallback = await extract_seed(seed_text, config)
+            fallback_claims = list(seed_fallback.claims)
+            skeleton = PaperSkeletonCandidate(
+                context_roots=[claim for claim in fallback_claims if claim.claim_type == ClaimType.context][:2],
+                core_methods=[claim for claim in fallback_claims if claim.claim_type == ClaimType.method][:3],
+                topline_results=[claim for claim in fallback_claims if claim.claim_type == ClaimType.result][:3],
+                assumptions=[claim for claim in fallback_claims if claim.claim_type == ClaimType.assumption][:2],
+                negatives=[claim for claim in fallback_claims if claim.claim_type == ClaimType.negative][:2],
+            )
         progress.advance(phase1_task)
         phase1_after = get_cost_tracker()
         console.print(
-            f"Phase 1 claims: {len(seed_claims)} | cost +${_cost_delta(phase1_before, phase1_after):.4f}"
+            "Phase 1 skeleton: "
+            f"context={len(skeleton.context_roots)} method={len(skeleton.core_methods)} "
+            f"result={len(skeleton.topline_results)} assumption={len(skeleton.assumptions)} "
+            f"negative={len(skeleton.negatives)} "
+            f"| cost +${_cost_delta(phase1_before, phase1_after):.4f}"
         )
 
         section_inputs = [
@@ -748,53 +1107,91 @@ async def decompose_paper(pdf_path: str, config_path: str = "config.yaml") -> Pa
             for section in document.sections
             if section.role.value != "abstract" and not _is_reference_section(section)
         ]
-
         phase2_before = get_cost_tracker()
 
-        async def section_worker(section: Section) -> list[RawClaim]:
-            result = await extract_section_claims(
-                section,
-                seed_claims,
-                document.all_artifacts,
-                config,
+        async def section_worker(section: Section):
+            section_artifacts = list(section.artifacts) if section.artifacts else list(document.all_artifacts)
+            return await extract_section_digest(
+                section=section,
+                skeleton=skeleton,
+                artifacts=section_artifacts,
+                config=config,
             )
-            return list(result.claims)
 
         section_results = await _run_parallel_with_progress(
             section_inputs,
             progress=progress,
-            description="Phase 2/5: Section claims",
+            description="Phase 2/6: Section digests",
             limit=_read_max_concurrent(config),
             worker=section_worker,
         )
 
-        extracted_claims: list[RawClaim] = []
+        argument_candidates: list[SectionArgumentCandidate] = []
+        support_details: list[SupportDetail] = []
         for section_obj, result in zip(section_inputs, section_results, strict=False):
             if isinstance(result, Exception):
                 console.print(
-                    f"[red]Section extraction failed[/red] ({_section_label(section_obj)}): {result}"
+                    f"[red]Section digest failed[/red] ({_section_label(section_obj)}): {result}"
                 )
                 continue
-            extracted_claims.extend(result)
+            argument_candidates.extend(result.argument_candidates)
+            support_details.extend(result.support_details)
 
-        if section_inputs and not extracted_claims:
-            raise RuntimeError("Phase 2 extracted zero claims across non-abstract sections; aborting run.")
+        if section_inputs and not argument_candidates and not skeleton.claims():
+            raise RuntimeError("Phase 2 produced zero argument candidates and empty skeleton; aborting run.")
 
-        normalized_claims = _normalize_claim_semantics([*seed_claims, *extracted_claims])
-        normalized_claims = _collapse_claim_duplicates(normalized_claims)
-        unique_claims, unique_id_map = _uniquify_claim_ids(normalized_claims)
-        unique_claims = _remap_structural_hint_ids(unique_claims, unique_id_map)
-        all_claims, normalized_id_map = _normalize_claim_id_scheme(unique_claims)
-        all_claims = _remap_structural_hint_ids(all_claims, normalized_id_map)
+        promoted_claims, unmatched_high_strength, _ = _promote_argument_candidates(
+            argument_candidates,
+            skeleton,
+            document.sections,
+            config,
+        )
+
+        repaired = False
+        if _needs_skeleton_repair(promoted_claims, unmatched_high_strength, skeleton):
+            repaired = True
+            skeleton = await repair_skeleton(skeleton, unmatched_high_strength, config)
+            promoted_claims, unmatched_high_strength, _ = _promote_argument_candidates(
+                argument_candidates,
+                skeleton,
+                document.sections,
+                config,
+            )
+
+        all_promoted = _normalize_claim_semantics([*skeleton.claims(), *promoted_claims])
+        all_promoted = _collapse_claim_duplicates(all_promoted)
+        all_promoted, unique_map = _uniquify_claim_ids(all_promoted)
+        all_promoted = _remap_structural_hint_ids(all_promoted, unique_map)
+        all_promoted, norm_map = _normalize_claim_id_scheme(all_promoted)
+        all_promoted = _remap_structural_hint_ids(all_promoted, norm_map)
+
         phase2_after = get_cost_tracker()
         console.print(
-            "Phase 2 total claims: "
-            f"{len(all_claims)} | by type={_claim_type_counts(all_claims)} "
+            "Phase 2 promoted claims: "
+            f"{len(all_promoted)} | candidates={len(argument_candidates)} "
+            f"support_details={len(support_details)} repaired={repaired} "
             f"| cost +${_cost_delta(phase2_before, phase2_after):.4f}"
         )
 
-        phase2b_before = get_cost_tracker()
-        method_claims = [claim for claim in all_claims if claim.claim_type == ClaimType.method]
+        phase3_task = progress.add_task("Phase 3/6: Hybrid dedup", total=1)
+        phase3_before = get_cost_tracker()
+        try:
+            deduplicated_claims, dedup_groups = await hybrid_dedup_promoted(all_promoted, config)
+            deduplicated_claims = _merge_structural_hints(deduplicated_claims, dedup_groups)
+            deduplicated_claims = _refine_tree_candidate_claims(deduplicated_claims, document.sections)
+        except Exception as exc:
+            console.print(f"[yellow]Hybrid dedup failed:[/yellow] {exc}")
+            deduplicated_claims = list(all_promoted)
+            dedup_groups = []
+        progress.advance(phase3_task)
+        phase3_after = get_cost_tracker()
+        console.print(
+            f"Phase 3 claims: {len(all_promoted)} -> {len(deduplicated_claims)} "
+            f"({len(dedup_groups)} groups) | cost +${_cost_delta(phase3_before, phase3_after):.4f}"
+        )
+
+        phase4_before = get_cost_tracker()
+        method_claims = [claim for claim in deduplicated_claims if claim.claim_type == ClaimType.method]
 
         async def facet_worker(claim: RawClaim) -> FacetedClaim:
             source = _find_section_for_claim(claim, document.sections)
@@ -803,7 +1200,7 @@ async def decompose_paper(pdf_path: str, config_path: str = "config.yaml") -> Pa
         facet_results = await _run_parallel_with_progress(
             method_claims,
             progress=progress,
-            description="Phase 2b/5: Method facets",
+            description="Phase 4/6: Method facets",
             limit=_read_max_concurrent(config),
             worker=facet_worker,
         )
@@ -811,53 +1208,22 @@ async def decompose_paper(pdf_path: str, config_path: str = "config.yaml") -> Pa
         faceted_claims: list[FacetedClaim] = []
         for claim, result in zip(method_claims, facet_results, strict=False):
             if isinstance(result, Exception):
-                console.print(
-                    f"[red]Facet extraction failed[/red] ({claim.claim_id}): {result}"
-                )
+                console.print(f"[red]Facet extraction failed[/red] ({claim.claim_id}): {result}")
                 continue
             faceted_claims.append(result)
 
-        intervention_counts = Counter(
-            faceted.universal_facets.intervention_types[0].value
-            for faceted in faceted_claims
-            if faceted.universal_facets.intervention_types
-        )
-        phase2b_after = get_cost_tracker()
+        phase4_after = get_cost_tracker()
         console.print(
-            "Phase 2b faceted claims: "
-            f"{len(faceted_claims)}/{len(method_claims)} "
-            f"| intervention={dict(intervention_counts)} "
-            f"| cost +${_cost_delta(phase2b_before, phase2b_after):.4f}"
+            "Phase 4 faceted claims: "
+            f"{len(faceted_claims)}/{len(method_claims)} | cost +${_cost_delta(phase4_before, phase4_after):.4f}"
         )
 
-        phase3_task = progress.add_task("Phase 3/5: Deduplicate claims", total=1)
-        phase3_before = get_cost_tracker()
+        phase5_task = progress.add_task("Phase 5/6: Deterministic tree", total=1)
+        phase5_before = get_cost_tracker()
+        negative_claims = [claim for claim in deduplicated_claims if claim.claim_type == ClaimType.negative]
+        attached_support_details = _attach_support_details(support_details, deduplicated_claims)
         try:
-            deduplicated_claims, dedup_groups = await chunked_dedup(all_claims, config)
-            deduplicated_claims = _merge_structural_hints(deduplicated_claims, dedup_groups)
-            deduplicated_claims = _collapse_claim_duplicates(deduplicated_claims)
-            dedup_group_count = len(dedup_groups)
-        except Exception as exc:
-            console.print(f"[yellow]Deduplication failed:[/yellow] {exc}")
-            deduplicated_claims = list(all_claims)
-            dedup_groups = []
-            dedup_group_count = 0
-        progress.advance(phase3_task)
-
-        phase3_after = get_cost_tracker()
-        console.print(
-            f"Phase 3 claims: {len(all_claims)} -> {len(deduplicated_claims)} "
-            f"({dedup_group_count} groups) "
-            f"| cost +${_cost_delta(phase3_before, phase3_after):.4f}"
-        )
-
-        phase4_task = progress.add_task("Phase 4/5: Assemble tree", total=1)
-        phase4_before = get_cost_tracker()
-        negative_claims = [
-            claim for claim in deduplicated_claims if claim.claim_type == ClaimType.negative
-        ]
-        try:
-            decomposition = await assemble_tree(
+            decomposition = await assemble_tree_deterministic(
                 metadata=document.metadata,
                 claims=deduplicated_claims,
                 faceted=faceted_claims,
@@ -865,9 +1231,10 @@ async def decompose_paper(pdf_path: str, config_path: str = "config.yaml") -> Pa
                 artifacts=document.all_artifacts,
                 config=config,
                 claim_groups=dedup_groups,
+                support_details=attached_support_details,
             )
         except Exception as exc:
-            console.print(f"[yellow]Tree assembly failed:[/yellow] {exc}")
+            console.print(f"[yellow]Deterministic tree assembly failed:[/yellow] {exc}")
             fallback_cost = float(get_cost_tracker().get("total_cost_usd", 0.0))
             decomposition = _build_fallback_decomposition(
                 document=document,
@@ -875,17 +1242,17 @@ async def decompose_paper(pdf_path: str, config_path: str = "config.yaml") -> Pa
                 faceted_claims=faceted_claims,
                 negative_claims=negative_claims,
                 extraction_cost_usd=fallback_cost,
-            )
-        progress.advance(phase4_task)
+            ).model_copy(update={"support_details": attached_support_details})
+        progress.advance(phase5_task)
 
-        phase4_after = get_cost_tracker()
-        total_cost = float(phase4_after.get("total_cost_usd", 0.0))
+        phase5_after = get_cost_tracker()
+        total_cost = float(phase5_after.get("total_cost_usd", 0.0))
         decomposition = decomposition.model_copy(update={"extraction_cost_usd": total_cost})
-
         node_count, depth, edge_count = _tree_stats(decomposition.claim_tree)
         console.print(
-            f"Phase 4 tree nodes={node_count} depth={depth} edges={edge_count} "
-            f"| cost +${_cost_delta(phase4_before, phase4_after):.4f}"
+            f"Phase 5 tree nodes={node_count} depth={depth} edges={edge_count} "
+            f"| support_details={len(decomposition.support_details)} "
+            f"| cost +${_cost_delta(phase5_before, phase5_after):.4f}"
         )
 
     output_dir = _resolve_output_dir(config)

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from typing import Any, cast
 
 from ..models import call_model
 from ..schema import (
+    AmbiguityResolutionOutput,
     ClaimLocalRole,
     ClaimGroup,
     ClaimNode,
     ClaimType,
     EvidenceArtifact,
+    EvidencePointer,
     FacetedClaim,
     ModelTier,
     OneLiner,
@@ -76,6 +79,8 @@ Return JSON only.
 """
 
 _VALID_TIERS: set[ModelTier] = {"small", "medium", "heavy"}
+DEFAULT_PARENT_ACCEPT_THRESHOLD = 0.68
+DEFAULT_PARENT_MARGIN_THRESHOLD = 0.12
 
 
 def _resolve_model_tier(config: Any) -> ModelTier:
@@ -168,6 +173,113 @@ _HIGH_LEVEL_METHOD_HINTS = (
     "this paper",
 )
 
+_IMPLEMENTATION_PROVENANCE_HINTS = (
+    "implementation details",
+    "implementation detail",
+    "engineering details",
+    "appendix",
+    "reproducibility",
+)
+
+_TOP_LINE_RESULT_TOKENS = {
+    "baseline",
+    "baselines",
+    "end",
+    "latency",
+    "memory",
+    "outperform",
+    "outperforms",
+    "overall",
+    "saving",
+    "savings",
+    "speedup",
+    "throughput",
+}
+
+_SUBMECHANISM_RESULT_TOKENS = {
+    "ablation",
+    "allocator",
+    "block",
+    "cache",
+    "kernel",
+    "microbenchmark",
+    "overhead",
+    "recomputation",
+    "scheduler",
+    "swap",
+    "swapping",
+    "table",
+}
+
+_TOP_LINE_RESULT_PHRASES = (
+    "across baselines",
+    "across workloads",
+    "end-to-end",
+    "higher throughput",
+    "lower latency",
+    "memory saving",
+    "memory savings",
+    "overall latency",
+    "overall memory",
+    "overall throughput",
+    "outperforms",
+    "same latency",
+)
+
+_SUBMECHANISM_RESULT_PHRASES = (
+    "ablation",
+    "block size",
+    "block-table indirection",
+    "cache manager",
+    "kernel latency",
+    "kernel overhead",
+    "microbenchmark",
+    "scheduler comparison",
+    "scheduler overhead",
+    "swap vs recomputation",
+    "swapping vs recomputation",
+)
+
+_MULTIPLIER_RESULT_RE = re.compile(r"\b\d+(?:\.\d+)?(?:\s*[–-]\s*\d+(?:\.\d+)?)?\s*x\b", re.IGNORECASE)
+
+_SOFTWARE_STACK_TOKENS = {
+    "api",
+    "cuda",
+    "flask",
+    "grpc",
+    "http",
+    "jax",
+    "kubernetes",
+    "library",
+    "numpy",
+    "openai",
+    "pytorch",
+    "python",
+    "rest",
+    "service",
+    "tensorflow",
+    "torch",
+    "triton",
+}
+
+_API_VERB_TOKENS = {
+    "accepts",
+    "api",
+    "argument",
+    "arguments",
+    "call",
+    "calls",
+    "endpoint",
+    "function",
+    "invokes",
+    "parameter",
+    "parameters",
+    "request",
+    "requests",
+    "response",
+    "returns",
+}
+
 
 def _claim_tokens(text: str) -> set[str]:
     lowered = _clean_text(text).lower()
@@ -176,6 +288,103 @@ def _claim_tokens(text: str) -> set[str]:
         for token in _TOKEN_SPLIT_RE.split(lowered)
         if token and len(token) > 2 and token not in _STOPWORDS
     }
+
+
+def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return max(low, min(high, value))
+
+
+def _token_overlap_score(left_text: str, right_text: str) -> float:
+    left = _claim_tokens(left_text)
+    right = _claim_tokens(right_text)
+    if not left or not right:
+        return 0.0
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
+
+
+def _section_proximity_score(child: RawClaim, parent: RawClaim) -> float:
+    child_source = _clean_text(child.source_section).lower()
+    parent_source = _clean_text(parent.source_section).lower()
+    if not child_source or not parent_source:
+        return 0.0
+    if child_source == parent_source:
+        return 1.0
+    if child_source in parent_source or parent_source in child_source:
+        return 0.75
+    child_tokens = {token for token in _TOKEN_SPLIT_RE.split(child_source) if token}
+    parent_tokens = {token for token in _TOKEN_SPLIT_RE.split(parent_source) if token}
+    if not child_tokens or not parent_tokens:
+        return 0.0
+    overlap = len(child_tokens & parent_tokens)
+    return overlap / max(1, min(len(child_tokens), len(parent_tokens)))
+
+
+def _entity_overlap_score(child: RawClaim, parent: RawClaim) -> float:
+    child_entities = {entity.strip().lower() for entity in child.entity_names if entity.strip()}
+    parent_entities = {entity.strip().lower() for entity in parent.entity_names if entity.strip()}
+    if not child_entities or not parent_entities:
+        return 0.0
+    return len(child_entities & parent_entities) / max(1, len(child_entities))
+
+
+def _evidence_overlap_score(child: RawClaim, parent: RawClaim) -> float:
+    child_evidence = _evidence_ids(child)
+    parent_evidence = _evidence_ids(parent)
+    if not child_evidence or not parent_evidence:
+        return 0.0
+    return len(child_evidence & parent_evidence) / max(1, len(child_evidence))
+
+
+def _anchor_match_strength(child: RawClaim, parent: RawClaim) -> float:
+    hints = child.structural_hints
+    if hints is None:
+        return 0.0
+    if hints.elaborates_seed_id and hints.elaborates_seed_id == parent.claim_id:
+        return 1.0
+    if hints.preferred_parent_type == ParentPreference.method and parent.claim_type == ClaimType.method:
+        return 0.45
+    if hints.preferred_parent_type == ParentPreference.context and parent.claim_type == ClaimType.context:
+        return 0.45
+    return 0.0
+
+
+def _parent_level_prior(child: RawClaim, parent: RawClaim) -> float:
+    if parent.claim_type != ClaimType.method:
+        return 0.5
+    if child.claim_type == ClaimType.result:
+        scope = _classify_result_scope(child)
+        if scope == "top_level":
+            return 1.0 if _is_top_level_method(parent) else 0.3
+        if scope == "submechanism":
+            return 1.0 if _is_submechanism_method(parent) else 0.3
+    if child.claim_type == ClaimType.method:
+        if _is_low_level_method(child):
+            return 1.0 if _is_submechanism_method(parent) else 0.4
+        return 1.0 if _is_top_level_method(parent) else 0.5
+    return 0.7
+
+
+def parent_confidence_score(child: RawClaim, parent: RawClaim) -> float:
+    # Candidate parent set is already filtered by allowed parent grammar.
+    section_score = _section_proximity_score(child, parent)
+    entity_score = _entity_overlap_score(child, parent)
+    evidence_score = _evidence_overlap_score(child, parent)
+    token_score = _token_overlap_score(child.statement, parent.statement)
+    anchor_score = _anchor_match_strength(child, parent)
+    prior_score = _parent_level_prior(child, parent)
+
+    weighted = (
+        0.18 * section_score
+        + 0.18 * entity_score
+        + 0.18 * evidence_score
+        + 0.18 * token_score
+        + 0.14 * anchor_score
+        + 0.14 * prior_score
+    )
+    return _clamp(weighted)
 
 
 def _evidence_ids(claim: RawClaim) -> set[str]:
@@ -223,15 +432,80 @@ def _method_affinity_score(claim: RawClaim, method: RawClaim) -> int:
     return score
 
 
+def _method_local_role(claim: RawClaim) -> ClaimLocalRole | None:
+    hints = claim.structural_hints
+    if hints is None:
+        return None
+    return hints.local_role
+
+
+def _is_top_level_method(claim: RawClaim) -> bool:
+    local_role = _method_local_role(claim)
+    if local_role == ClaimLocalRole.top_level:
+        return True
+    if local_role in {ClaimLocalRole.mechanism, ClaimLocalRole.implementation_detail}:
+        return False
+
+    statement = _clean_text(claim.statement).lower()
+    if any(hint in statement for hint in _HIGH_LEVEL_METHOD_HINTS):
+        return True
+    return _method_specificity_score(claim) <= 1
+
+
+def _is_submechanism_method(claim: RawClaim) -> bool:
+    local_role = _method_local_role(claim)
+    if local_role in {ClaimLocalRole.mechanism, ClaimLocalRole.implementation_detail}:
+        return True
+    if local_role == ClaimLocalRole.top_level:
+        return False
+    return _is_low_level_method(claim)
+
+
+def _classify_result_scope(claim: RawClaim) -> str:
+    if claim.claim_type != ClaimType.result:
+        return "neutral"
+
+    statement = _clean_text(claim.statement).lower()
+    tokens = _claim_tokens(statement)
+    top_level_score = len(tokens & _TOP_LINE_RESULT_TOKENS)
+    submechanism_score = len(tokens & _SUBMECHANISM_RESULT_TOKENS)
+
+    top_level_score += sum(2 for phrase in _TOP_LINE_RESULT_PHRASES if phrase in statement)
+    submechanism_score += sum(2 for phrase in _SUBMECHANISM_RESULT_PHRASES if phrase in statement)
+
+    if _MULTIPLIER_RESULT_RE.search(statement):
+        top_level_score += 2
+    if " vs " in f" {statement} " or " versus " in f" {statement} ":
+        top_level_score += 1
+
+    if top_level_score >= submechanism_score + 2 and top_level_score > 0:
+        return "top_level"
+    if submechanism_score >= top_level_score + 1 and submechanism_score > 0:
+        return "submechanism"
+    return "neutral"
+
+
 def _best_method_parent(
     claim: RawClaim,
     method_claims: list[RawClaim],
 ) -> tuple[str | None, int]:
+    candidate_methods = [method for method in method_claims if method.claim_id != claim.claim_id]
+    if not candidate_methods:
+        return None, -1
+
+    result_scope = _classify_result_scope(claim)
+    if result_scope == "top_level":
+        top_level_methods = [method for method in candidate_methods if _is_top_level_method(method)]
+        if top_level_methods:
+            candidate_methods = top_level_methods
+    elif result_scope == "submechanism":
+        submechanism_methods = [method for method in candidate_methods if _is_submechanism_method(method)]
+        if submechanism_methods:
+            candidate_methods = submechanism_methods
+
     best_id: str | None = None
     best_score = -1
-    for method in method_claims:
-        if method.claim_id == claim.claim_id:
-            continue
+    for method in candidate_methods:
         score = _method_affinity_score(claim, method)
         if score > best_score:
             best_score = score
@@ -331,16 +605,157 @@ def _method_specificity_score(claim: RawClaim) -> int:
 
 
 def _is_low_level_method(claim: RawClaim) -> bool:
-    hint = claim.structural_hints
-    if hint is not None and hint.local_role is not None:
-        if hint.local_role == ClaimLocalRole.implementation_detail:
+    local_role = _method_local_role(claim)
+    if local_role is not None:
+        if local_role in {ClaimLocalRole.mechanism, ClaimLocalRole.implementation_detail}:
             return True
-        if hint.local_role == ClaimLocalRole.top_level:
+        if local_role == ClaimLocalRole.top_level:
             return False
     statement = _clean_text(claim.statement).lower()
     if any(hint in statement for hint in _HIGH_LEVEL_METHOD_HINTS):
         return False
     return _method_specificity_score(claim) >= 2
+
+
+def _method_entity_set(claim: RawClaim) -> set[str]:
+    return {entity.strip().lower() for entity in claim.entity_names if entity.strip()}
+
+
+def _has_strong_core_method_overlap(claim: RawClaim, core_method_claims: list[RawClaim]) -> bool:
+    claim_entities = _method_entity_set(claim)
+    if claim_entities:
+        for core_method in core_method_claims:
+            if core_method.claim_id == claim.claim_id:
+                continue
+            if claim_entities & _method_entity_set(core_method):
+                return True
+
+    best_method_id, affinity = _best_method_parent(claim, core_method_claims)
+    return best_method_id is not None and affinity >= 8
+
+
+def _looks_like_software_stack_description(claim: RawClaim) -> bool:
+    tokens = _claim_tokens(claim.statement)
+    return len(tokens & _SOFTWARE_STACK_TOKENS) >= 2 and len(tokens) <= 10
+
+
+def _looks_like_local_api_definition(claim: RawClaim) -> bool:
+    tokens = _claim_tokens(claim.statement)
+    return len(tokens & _API_VERB_TOKENS) >= 2 and len(tokens) <= 12
+
+
+def _is_too_short_or_tautological_method(claim: RawClaim) -> bool:
+    statement = _clean_text(claim.statement)
+    if len(statement) < 35:
+        return True
+    tokens = _claim_tokens(statement)
+    if len(tokens) < 5:
+        return True
+
+    lowered = statement.lower()
+    tautological_prefixes = ("we use ", "we implement ", "this method is ", "our method is ")
+    if lowered.startswith(tautological_prefixes):
+        return True
+    if "is a method" in lowered or "our approach works" in lowered:
+        return True
+    return False
+
+
+def _is_claim_worthy_node(
+    claim: RawClaim,
+    faceted_by_id: dict[str, FacetedClaim],
+    core_method_claims: list[RawClaim],
+    source_section: str,
+) -> bool:
+    if claim.claim_type != ClaimType.method:
+        return True
+
+    hints = claim.structural_hints
+    if hints is not None and hints.local_role == ClaimLocalRole.top_level:
+        return True
+    if claim.claim_strength is not None:
+        threshold = 2.4
+        if hints is not None and hints.local_role is not None:
+            if hints.local_role == ClaimLocalRole.mechanism:
+                threshold -= 0.2
+            elif hints.local_role == ClaimLocalRole.implementation_detail:
+                threshold += 0.6
+        if any(hint in source_section.strip().lower() for hint in _IMPLEMENTATION_PROVENANCE_HINTS):
+            threshold += 0.4
+        return claim.claim_strength >= threshold
+    if (
+        hints is not None
+        and hints.elaborates_seed_id
+        and hints.preferred_parent_type == ParentPreference.method
+    ):
+        return True
+
+    has_evidence = bool(_evidence_ids(claim))
+    has_facets = claim.claim_id in faceted_by_id
+    has_strong_overlap = _has_strong_core_method_overlap(claim, core_method_claims)
+
+    source_lower = source_section.strip().lower()
+    implementation_provenance = any(hint in source_lower for hint in _IMPLEMENTATION_PROVENANCE_HINTS)
+    stack_description = _looks_like_software_stack_description(claim)
+    local_api_definition = _looks_like_local_api_definition(claim)
+    too_short_or_tautological = _is_too_short_or_tautological_method(claim)
+
+    if too_short_or_tautological:
+        return False
+    if implementation_provenance and not has_evidence and not has_strong_overlap:
+        return False
+    if stack_description and not has_evidence and not has_strong_overlap:
+        return False
+    if local_api_definition and not has_evidence and not has_strong_overlap:
+        return False
+    if not has_evidence and not has_strong_overlap and _is_low_level_method(claim):
+        return False
+
+    return has_evidence or has_facets or has_strong_overlap or not _is_low_level_method(claim)
+
+
+def _nearest_higher_level_method_id(
+    claim: RawClaim,
+    method_claims: list[RawClaim],
+) -> str | None:
+    if not method_claims:
+        return None
+
+    higher_level_candidates = [method for method in method_claims if method.claim_id != claim.claim_id]
+    higher_level_candidates = [method for method in higher_level_candidates if not _is_low_level_method(method)]
+    if not higher_level_candidates:
+        higher_level_candidates = [method for method in method_claims if method.claim_id != claim.claim_id]
+    if not higher_level_candidates:
+        return None
+
+    best_parent_id, score = _best_method_parent(claim, higher_level_candidates)
+    if best_parent_id is None:
+        return None
+    if score < 0:
+        return higher_level_candidates[0].claim_id
+    return best_parent_id
+
+
+def _merge_evidence_pointers(
+    primary: list[EvidencePointer],
+    supplemental: list[EvidencePointer],
+) -> list[EvidencePointer]:
+    merged: list[EvidencePointer] = list(primary)
+    seen = {
+        (pointer.artifact_id.strip().lower(), pointer.role.strip().lower())
+        for pointer in primary
+        if pointer.artifact_id.strip()
+    }
+    for pointer in supplemental:
+        artifact_id = pointer.artifact_id.strip()
+        if not artifact_id:
+            continue
+        key = (artifact_id.lower(), pointer.role.strip().lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(pointer)
+    return merged
 
 
 def _paper_label(metadata: PaperMetadata) -> str:
@@ -665,6 +1080,47 @@ def _build_tree_nodes(
         claim_by_id[claim.claim_id] = claim
         claim_order.append(claim.claim_id)
 
+    facets_by_id = {faceted_claim.claim.claim_id: faceted_claim for faceted_claim in faceted}
+    all_method_claims = [claim_by_id[claim_id] for claim_id in claim_order if claim_by_id[claim_id].claim_type == ClaimType.method]
+    core_method_claims = [claim for claim in all_method_claims if not _is_low_level_method(claim)] or list(all_method_claims)
+
+    suppressed_method_ids: set[str] = set()
+    for method_claim in all_method_claims:
+        if _is_claim_worthy_node(
+            method_claim,
+            faceted_by_id=facets_by_id,
+            core_method_claims=core_method_claims,
+            source_section=method_claim.source_section,
+        ):
+            continue
+        suppressed_method_ids.add(method_claim.claim_id)
+
+    # Always keep at least one method node if methods are present.
+    if len(suppressed_method_ids) == len(all_method_claims) and all_method_claims:
+        strongest_method = max(
+            all_method_claims,
+            key=lambda claim: (len(_evidence_ids(claim)), _method_specificity_score(claim)),
+        )
+        suppressed_method_ids.discard(strongest_method.claim_id)
+
+    kept_method_claims = [
+        method_claim for method_claim in all_method_claims if method_claim.claim_id not in suppressed_method_ids
+    ]
+    folded_support_evidence: dict[str, list[EvidencePointer]] = {}
+    for suppressed_id in suppressed_method_ids:
+        suppressed_claim = claim_by_id[suppressed_id]
+        fold_parent_id = _nearest_higher_level_method_id(suppressed_claim, kept_method_claims)
+        if fold_parent_id is None:
+            continue
+        folded_support_evidence.setdefault(fold_parent_id, []).extend(suppressed_claim.evidence)
+
+    claim_order = [
+        claim_id
+        for claim_id in claim_order
+        if claim_id not in suppressed_method_ids
+    ]
+    claim_by_id = {claim_id: claim_by_id[claim_id] for claim_id in claim_order}
+
     valid_ids = set(claim_by_id)
     assignment_by_id: dict[str, TreeNodeAssignment] = {}
     for assignment in assignments:
@@ -864,7 +1320,14 @@ def _build_tree_nodes(
         current_score = _method_affinity_score(claim, current_parent_claim)
         overloaded_parent = child_count.get(current_parent, 0) >= 8
         better_specific_match = best_score >= current_score + 3
+        result_scope = _classify_result_scope(claim)
+        scope_prefers_best = (
+            result_scope == "top_level"
+            and _is_top_level_method(claim_by_id[best_method_id])
+            and not _is_top_level_method(current_parent_claim)
+        )
         should_reattach = best_method_id != current_parent and (
+            scope_prefers_best or
             better_specific_match or (overloaded_parent and best_score > current_score)
         )
         if not should_reattach:
@@ -891,13 +1354,15 @@ def _build_tree_nodes(
         if not depends_by_claim[claim_id]:
             depends_by_claim[claim_id] = [parent_id]
 
-    facets_by_id = {faceted_claim.claim.claim_id: faceted_claim for faceted_claim in faceted}
     nodes = {
         claim_id: ClaimNode(
             claim_id=claim.claim_id,
             claim_type=claim.claim_type,
             statement=claim.statement,
-            evidence=list(claim.evidence),
+            evidence=_merge_evidence_pointers(
+                list(claim.evidence),
+                folded_support_evidence.get(claim_id, []),
+            ),
             facets=facets_by_id.get(claim_id),
             children=[],
             depends_on=list(depends_by_claim.get(claim_id, [])),
@@ -918,6 +1383,267 @@ def _build_tree_nodes(
         parent_node.children.append(child_node)
 
     return [nodes[claim_id] for claim_id in claim_order if claim_id not in parent_by_claim]
+
+
+def _read_tree_float(config: Any, key: str, default: float) -> float:
+    pipeline = getattr(config, "pipeline", None)
+    tree_cfg = getattr(pipeline, "tree", None) if pipeline is not None else None
+    value: Any = None
+    if isinstance(tree_cfg, Mapping):
+        value = tree_cfg.get(key)
+    elif isinstance(config, Mapping):
+        pipeline_cfg = config.get("pipeline")
+        if isinstance(pipeline_cfg, Mapping):
+            raw_tree = pipeline_cfg.get("tree")
+            if isinstance(raw_tree, Mapping):
+                value = raw_tree.get(key)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _read_tree_int(config: Any, key: str, default: int) -> int:
+    pipeline = getattr(config, "pipeline", None)
+    tree_cfg = getattr(pipeline, "tree", None) if pipeline is not None else None
+    value: Any = None
+    if isinstance(tree_cfg, Mapping):
+        value = tree_cfg.get(key)
+    elif isinstance(config, Mapping):
+        pipeline_cfg = config.get("pipeline")
+        if isinstance(pipeline_cfg, Mapping):
+            raw_tree = pipeline_cfg.get("tree")
+            if isinstance(raw_tree, Mapping):
+                value = raw_tree.get(key)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _ambiguity_budget(non_context_count: int, config: Any) -> int:
+    configured = _read_tree_int(config, "ambiguity_budget", -1)
+    if configured >= 0:
+        return max(0, configured)
+    return min(8, int(math.ceil(0.15 * max(0, non_context_count))))
+
+
+def _deterministic_one_liner(claims: list[RawClaim]) -> OneLiner:
+    context_claim = next((claim for claim in claims if claim.claim_type == ClaimType.context), None)
+    method_claim = next((claim for claim in claims if claim.claim_type == ClaimType.method), None)
+    result_claim = next((claim for claim in claims if claim.claim_type == ClaimType.result), None)
+    fallback = claims[0].statement if claims else "UNSPECIFIED"
+    return OneLiner(
+        achieved=_clean_text(result_claim.statement if result_claim is not None else fallback) or "UNSPECIFIED",
+        via=_clean_text(method_claim.statement if method_claim is not None else fallback) or "UNSPECIFIED",
+        because=_clean_text(context_claim.statement if context_claim is not None else fallback) or "UNSPECIFIED",
+    )
+
+
+def _candidate_parent_scores(
+    claim: RawClaim,
+    claims: list[RawClaim],
+) -> list[tuple[RawClaim, float]]:
+    allowed_parent_types = _ALLOWED_PARENT_TYPES.get(claim.claim_type, set())
+    candidates = [
+        parent
+        for parent in claims
+        if parent.claim_id != claim.claim_id and parent.claim_type in allowed_parent_types
+    ]
+    scored = [(parent, parent_confidence_score(claim, parent)) for parent in candidates]
+    scored.sort(key=lambda item: (item[1], item[0].claim_id), reverse=True)
+    return scored
+
+
+def _build_deterministic_assignments(
+    claims: list[RawClaim],
+    *,
+    parent_hints: dict[str, str],
+    accept_threshold: float,
+    margin_threshold: float,
+    ambiguity_budget: int,
+) -> tuple[list[TreeNodeAssignment], list[dict[str, Any]]]:
+    claim_by_id = {claim.claim_id: claim for claim in claims}
+    assignments: dict[str, TreeNodeAssignment] = {}
+    ambiguities: list[dict[str, Any]] = []
+
+    for claim in claims:
+        if claim.claim_type == ClaimType.context:
+            assignments[claim.claim_id] = TreeNodeAssignment(
+                claim_id=claim.claim_id,
+                parent_id=None,
+                depends_on=[],
+            )
+            continue
+
+        hinted_parent = parent_hints.get(claim.claim_id)
+        if hinted_parent in claim_by_id and hinted_parent != claim.claim_id:
+            assignments[claim.claim_id] = TreeNodeAssignment(
+                claim_id=claim.claim_id,
+                parent_id=hinted_parent,
+                depends_on=[hinted_parent],
+            )
+            continue
+
+        scored = _candidate_parent_scores(claim, claims)
+        if not scored:
+            assignments[claim.claim_id] = TreeNodeAssignment(
+                claim_id=claim.claim_id,
+                parent_id=None,
+                depends_on=[],
+            )
+            continue
+
+        top_parent, top_score = scored[0]
+        second_score = scored[1][1] if len(scored) > 1 else 0.0
+        margin = top_score - second_score
+        assignments[claim.claim_id] = TreeNodeAssignment(
+            claim_id=claim.claim_id,
+            parent_id=top_parent.claim_id,
+            depends_on=[top_parent.claim_id],
+        )
+
+        if top_score >= accept_threshold and margin >= margin_threshold:
+            continue
+
+        ambiguities.append(
+            {
+                "claim": claim,
+                "top_score": top_score,
+                "margin": margin,
+                "candidates": scored[:4],
+            }
+        )
+
+    if ambiguity_budget <= 0 or not ambiguities:
+        return list(assignments.values()), []
+
+    ambiguities.sort(key=lambda item: (item["top_score"], item["margin"]))
+    return list(assignments.values()), ambiguities[:ambiguity_budget]
+
+
+def _build_ambiguity_prompt(
+    ambiguities: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    lines: list[str] = []
+    for idx, entry in enumerate(ambiguities, start=1):
+        claim = cast(RawClaim, entry["claim"])
+        lines.append(f"{idx}. CLAIM [{claim.claim_id}] ({claim.claim_type.value}): {claim.statement}")
+        for rank, (candidate, score) in enumerate(cast(list[tuple[RawClaim, float]], entry["candidates"]), start=1):
+            lines.append(
+                f"   - C{rank} [{candidate.claim_id}] ({candidate.claim_type.value}) score={score:.3f}: {candidate.statement}"
+            )
+
+    return [
+        {
+            "role": "system",
+            "content": (
+                "Resolve ambiguous parent assignments. Choose one parent_id per claim from listed candidates only. "
+                "Respect type grammar and prefer the most specific semantically aligned parent."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Ambiguous claims and candidate parents:\\n"
+                + "\\n".join(lines)
+                + "\\n\\nReturn JSON with key `nodes`: [{claim_id, parent_id, depends_on}]."
+            ),
+        },
+    ]
+
+
+async def _resolve_ambiguities(
+    ambiguities: list[dict[str, Any]],
+    config: Any,
+) -> dict[str, TreeNodeAssignment]:
+    if not ambiguities:
+        return {}
+
+    messages = _build_ambiguity_prompt(ambiguities)
+    result = await call_model(
+        tier=_resolve_model_tier(config),
+        messages=messages,
+        response_schema=AmbiguityResolutionOutput,
+        config=config,
+    )
+    if not isinstance(result, AmbiguityResolutionOutput):
+        return {}
+
+    allowed_by_claim: dict[str, set[str]] = {}
+    for entry in ambiguities:
+        claim = cast(RawClaim, entry["claim"])
+        candidate_ids = {candidate.claim_id for candidate, _ in cast(list[tuple[RawClaim, float]], entry["candidates"])}
+        allowed_by_claim[claim.claim_id] = candidate_ids
+
+    resolved: dict[str, TreeNodeAssignment] = {}
+    for node in result.nodes:
+        allowed = allowed_by_claim.get(node.claim_id)
+        if not allowed:
+            continue
+        parent_id = (node.parent_id or "").strip()
+        if parent_id not in allowed:
+            continue
+        resolved[node.claim_id] = TreeNodeAssignment(
+            claim_id=node.claim_id,
+            parent_id=parent_id,
+            depends_on=[parent_id],
+        )
+    return resolved
+
+
+async def assemble_tree_deterministic(
+    metadata: PaperMetadata,
+    claims: list[RawClaim],
+    faceted: list[FacetedClaim],
+    negatives: list[RawClaim],
+    artifacts: list[EvidenceArtifact],
+    config: Any,
+    claim_groups: list[ClaimGroup] | None = None,
+    support_details: list[Any] | None = None,
+) -> PaperDecomposition:
+    normalized_negatives = list(negatives) or [claim for claim in claims if claim.claim_type == ClaimType.negative]
+    combined_claims = list(claims)
+    known_ids = {claim.claim_id for claim in combined_claims}
+    for claim in normalized_negatives:
+        if claim.claim_id in known_ids:
+            continue
+        known_ids.add(claim.claim_id)
+        combined_claims.append(claim)
+
+    parent_hints = _canonical_parent_hints(combined_claims, claim_groups)
+    accept_threshold = _read_tree_float(config, "parent_accept_threshold", DEFAULT_PARENT_ACCEPT_THRESHOLD)
+    margin_threshold = _read_tree_float(config, "parent_margin_threshold", DEFAULT_PARENT_MARGIN_THRESHOLD)
+    non_context_count = sum(1 for claim in combined_claims if claim.claim_type != ClaimType.context)
+    budget = _ambiguity_budget(non_context_count, config)
+
+    assignments, ambiguities = _build_deterministic_assignments(
+        combined_claims,
+        parent_hints=parent_hints,
+        accept_threshold=accept_threshold,
+        margin_threshold=margin_threshold,
+        ambiguity_budget=budget,
+    )
+    assignment_by_id = {assignment.claim_id: assignment for assignment in assignments}
+
+    if ambiguities:
+        try:
+            resolved = await _resolve_ambiguities(ambiguities, config)
+        except Exception:
+            resolved = {}
+        assignment_by_id.update(resolved)
+
+    final_assignments = [assignment_by_id[claim.claim_id] for claim in combined_claims if claim.claim_id in assignment_by_id]
+    claim_tree = _build_tree_nodes(combined_claims, faceted, final_assignments, parent_hints=parent_hints)
+
+    return PaperDecomposition(
+        metadata=metadata,
+        one_liner=_deterministic_one_liner(combined_claims),
+        claim_tree=claim_tree,
+        negative_claims=normalized_negatives,
+        support_details=list(support_details or []),
+        all_artifacts=list(artifacts),
+    )
 
 
 async def assemble_tree(
@@ -967,4 +1693,10 @@ async def assemble_tree(
     )
 
 
-__all__ = ["TREE_SYSTEM_PROMPT", "build_tree_prompt", "assemble_tree"]
+__all__ = [
+    "TREE_SYSTEM_PROMPT",
+    "build_tree_prompt",
+    "parent_confidence_score",
+    "assemble_tree_deterministic",
+    "assemble_tree",
+]
