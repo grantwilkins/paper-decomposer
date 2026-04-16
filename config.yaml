@@ -78,6 +78,7 @@ pipeline:
   # Phase 4: tree assembly
   tree:
     model_tier: "heavy"
+    canonical_label_relabel_tier: "small"
     # The heavy model receives: seed skeleton + all deduplicated
     # claims + facets + negative claims. NOT the raw paper text.
     include_facets: true

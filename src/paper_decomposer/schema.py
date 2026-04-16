@@ -956,6 +956,29 @@ class AmbiguityResolutionOutput(BaseModel):
     nodes: list[TreeNodeAssignment] = Field(default_factory=list)
 
 
+class CanonicalLabelAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: str = Field(validation_alias=AliasChoices("claim_id", "id", "node_id"))
+    canonical_label: str = Field(validation_alias=AliasChoices("canonical_label", "label"))
+
+    @field_validator("claim_id", mode="before")
+    @classmethod
+    def _normalize_claim_id(cls, value: Any) -> Any:
+        return _coerce_string(value)
+
+    @field_validator("canonical_label", mode="before")
+    @classmethod
+    def _normalize_canonical_label(cls, value: Any) -> Any:
+        return _coerce_string(value)
+
+
+class CanonicalLabelOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    labels: list[CanonicalLabelAssignment] = Field(default_factory=list)
+
+
 class PaperDecomposition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1049,5 +1072,7 @@ __all__ = [
     "TreeNodeAssignment",
     "TreeAssemblyOutput",
     "AmbiguityResolutionOutput",
+    "CanonicalLabelAssignment",
+    "CanonicalLabelOutput",
     "PaperDecomposition",
 ]

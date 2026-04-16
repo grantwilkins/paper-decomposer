@@ -90,6 +90,32 @@ _CONTEXT_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 _NUMERIC_SIGNAL_RE = re.compile(r"(\d+(?:\.\d+)?\s*(x|%|percent|ms|s|gb|mb|tok/s|tokens/s))|(\bvs\.?\b)", re.IGNORECASE)
+_FALLBACK_ABLATION_RE = re.compile(r"\b(ablation|without\b|disabled?|remove[sd]?|turn(?:ed)? off|w/o)\b", re.IGNORECASE)
+_FALLBACK_WORKLOAD_RE = re.compile(
+    r"\b(workload|trace|distribution|dataset|sharegpt|alpaca|input length|output length|prompt length|request mix|request profile)\b",
+    re.IGNORECASE,
+)
+_FALLBACK_WORKLOAD_CHARACTERIZATION_RE = re.compile(
+    r"\b(distribution|input length|output length|prompt length|longer|shorter|average|median|percentile|dominates?|skew)\b",
+    re.IGNORECASE,
+)
+_FALLBACK_PERFORMANCE_RE = re.compile(
+    r"\b(throughput|request rates?|latency|speedup|memory saving|memory savings|sustain(?:s|ed)?|outperform|best performance)\b",
+    re.IGNORECASE,
+)
+_FALLBACK_CONSTRAINT_RE = re.compile(
+    r"\b(overhead|bottleneck|bound|constraint|limited by|exhausted|oom|out of memory|latency overhead|memory[- ]bound)\b",
+    re.IGNORECASE,
+)
+_FALLBACK_HEADLINE_RE = re.compile(
+    r"\b(throughput|request rates?|latency|speedup|outperform|higher throughput|same latency|end[- ]to[- ]end)\b",
+    re.IGNORECASE,
+)
+_FALLBACK_BASELINE_RE = re.compile(r"\b(vs|versus|baseline|baselines|fastertransformer|orca|qps)\b", re.IGNORECASE)
+_FALLBACK_SCOPED_SETTING_RE = re.compile(
+    r"\b(on|for|when|under|with)\b.{0,90}\b(dataset|trace|workload|beam|sampling|prefix|block size|opt-|llama|sharegpt|alpaca)\b",
+    re.IGNORECASE,
+)
 
 
 def _collapse_ws(value: str) -> str:
@@ -819,14 +845,26 @@ def _build_fallback_decomposition(
         if claim.claim_type != ClaimType.result:
             return None
         lowered = claim.statement.lower()
-        if "ablation" in lowered or "without" in lowered:
+        if _FALLBACK_ABLATION_RE.search(lowered):
             return ResultSubtype.ablation
-        if any(token in lowered for token in ("workload", "dataset", "distribution", "trace")):
+        if (
+            _FALLBACK_WORKLOAD_RE.search(lowered)
+            and _FALLBACK_WORKLOAD_CHARACTERIZATION_RE.search(lowered)
+            and not _FALLBACK_BASELINE_RE.search(lowered)
+            and not _FALLBACK_PERFORMANCE_RE.search(lowered)
+        ):
             return ResultSubtype.workload_characterization
-        if any(token in lowered for token in ("overhead", "bound", "constraint", "oom")):
+        if _FALLBACK_CONSTRAINT_RE.search(lowered):
             return ResultSubtype.constraint_observation
-        if any(token in lowered for token in ("throughput", "latency", "speedup", "outperform")):
+        if (
+            _FALLBACK_HEADLINE_RE.search(lowered)
+            and _FALLBACK_BASELINE_RE.search(lowered)
+            and not _FALLBACK_SCOPED_SETTING_RE.search(lowered)
+            and not _FALLBACK_WORKLOAD_CHARACTERIZATION_RE.search(lowered)
+        ):
             return ResultSubtype.headline_result
+        # Temporary semantic packing: scoped comparative outcomes fall back to
+        # mechanism_validation until scoped_result is a dedicated subtype.
         return ResultSubtype.mechanism_validation
 
     def fallback_semantic_role(claim: RawClaim, abstraction: AbstractionLevel, subtype: ResultSubtype | None) -> SemanticRole:
@@ -851,12 +889,41 @@ def _build_fallback_decomposition(
         return normalized
 
     def fallback_canonical_label(claim: RawClaim, normalized_statement: str) -> str:
+        blocklist = {"vllm", "orca", "fastertransformer", "sharegpt", "alpaca", "dataset", "baseline", "baselines"}
         tokens = [
             token
             for token in _CLAIM_TOKEN_SPLIT_RE.split(normalized_statement.lower())
-            if token and len(token) > 2 and token not in _CLAIM_STOPWORDS and not token.isdigit()
+            if (
+                token
+                and len(token) > 2
+                and token not in _CLAIM_STOPWORDS
+                and token not in blocklist
+                and not token.isdigit()
+            )
         ]
-        base = "_".join(tokens[:6]) or f"{claim.claim_type.value}_claim"
+        entity_tokens = [
+            token
+            for token in (
+                part
+                for entity in claim.entity_names
+                for part in _CLAIM_TOKEN_SPLIT_RE.split(entity.lower())
+            )
+            if (
+                token
+                and len(token) > 2
+                and token not in _CLAIM_STOPWORDS
+                and token not in blocklist
+                and not token.isdigit()
+            )
+        ]
+        ordered: list[str] = []
+        for token in [*entity_tokens, *tokens]:
+            if token in ordered:
+                continue
+            ordered.append(token)
+            if len(ordered) >= 6:
+                break
+        base = "_".join(ordered[:6]) or f"{claim.claim_type.value}_claim"
         candidate = base
         suffix = 2
         while candidate in used_labels:

@@ -9,7 +9,9 @@ from ..models import call_model
 from ..schema import (
     AbstractionLevel,
     AmbiguityResolutionOutput,
+    CanonicalLabelOutput,
     ClaimLocalRole,
+    ClaimStructuralHints,
     ClaimGroup,
     ClaimNode,
     ClaimType,
@@ -87,6 +89,18 @@ Return JSON only.
 _VALID_TIERS: set[ModelTier] = {"small", "medium", "heavy"}
 DEFAULT_PARENT_ACCEPT_THRESHOLD = 0.68
 DEFAULT_PARENT_MARGIN_THRESHOLD = 0.12
+
+LABEL_RELABEL_SYSTEM_PROMPT = """You rewrite canonical concept labels for claim nodes.
+
+Rules:
+- Output snake_case only: ^[a-z0-9]+(?:_[a-z0-9]+)*$
+- Prefer concept-style noun phrases, not compressed sentence fragments.
+- Avoid paper/system names unless concept-defining (PagedAttention is allowed).
+- Avoid dataset/baseline tokens unless the node is evaluation-specific.
+- Keep labels concise (2-6 tokens) and semantically faithful to normalized_statement.
+
+Return JSON: {"labels": [{"claim_id": "...", "canonical_label": "..."}]}
+"""
 
 
 def _resolve_model_tier(config: Any) -> ModelTier:
@@ -310,9 +324,19 @@ _SYSTEM_REALIZATION_TOKENS = {
 _SUBMECHANISM_METHOD_TOKENS = _LOW_LEVEL_METHOD_TOKENS | {
     "blocktable",
     "cachemanager",
+    "copyonwrite",
     "eviction",
+    "policy",
     "preemption",
 }
+
+_SUBMECHANISM_STRONG_METHOD_RE = re.compile(
+    r"\b("
+    r"scheduler|scheduling|preempt(?:ion)?|evict(?:ion)?|kernel|allocator|allocation|"
+    r"block[- ]?table|copy[- ]?on[- ]?write|policy"
+    r")\b",
+    re.IGNORECASE,
+)
 
 _TOP_LINE_BASELINE_RE = re.compile(
     r"\b(vs|versus|baseline|baselines|fastertransformer|orca|request rates?|qps)\b",
@@ -357,12 +381,24 @@ _WORKLOAD_RESULT_RE = re.compile(
     r"\b(workload|trace|distribution|dataset|sharegpt|alpaca|input length|output length|prompt length|request profile|request mix)\b",
     re.IGNORECASE,
 )
+_WORKLOAD_CHARACTERIZATION_RE = re.compile(
+    r"\b(distribution|input length|output length|prompt length|request mix|request profile|longer|shorter|average|median|percentile|dominates?|skew)\b",
+    re.IGNORECASE,
+)
+_RESULT_PERFORMANCE_RE = re.compile(
+    r"\b(throughput|request rates?|latency|speedup|memory saving|memory savings|sustain(?:s|ed)?|outperform|best performance)\b",
+    re.IGNORECASE,
+)
 _CONSTRAINT_RESULT_RE = re.compile(
     r"\b(overhead|bottleneck|bound|memory[- ]bound|latency overhead|constraint|limited by|exhausted|oom|out of memory|pcie)\b",
     re.IGNORECASE,
 )
 _HEADLINE_RESULT_RE = re.compile(
     r"\b(throughput|request rates?|latency|speedup|outperform|higher throughput|same latency|end[- ]to[- ]end)\b",
+    re.IGNORECASE,
+)
+_RESULT_SCOPED_SETTING_RE = re.compile(
+    r"\b(on|for|when|under|with)\b.{0,90}\b(dataset|trace|workload|beam|sampling|prefix|block size|opt-|llama|sharegpt|alpaca)\b",
     re.IGNORECASE,
 )
 _NORMALIZE_STATEMENT_PREFIX_RE = re.compile(
@@ -405,6 +441,16 @@ _CANONICAL_LABEL_VERB_WEIGHTS = {
     "latency",
     "memory",
 }
+_ASSUMPTION_CONDITIONAL_RE = re.compile(
+    r"\b(assume(?:s|d|ing)?|requires?|depends? on|if|when|unless|provided that|subject to|under the same)\b",
+    re.IGNORECASE,
+)
+_ASSUMPTION_MECHANISM_RE = re.compile(
+    r"\b(implements?|manages?|maps?|allocates?|shares?|schedules?|evicts?|applies?|uses?|copy[- ]?on[- ]?write|block[- ]?table|cache manager)\b",
+    re.IGNORECASE,
+)
+_LABEL_REWRITE_ALLOWED_SYSTEM_TOKENS = {"pagedattention"}
+_LABEL_REWRITE_EVAL_TOKENS = {"dataset", "trace", "sharegpt", "alpaca", "baseline", "baselines"}
 
 
 def _claim_tokens(text: str) -> set[str]:
@@ -610,8 +656,14 @@ def _method_abstraction_level(claim: RawClaim) -> str:
     if any(
         key in entity
         for entity in entities
-        for key in ("scheduler", "allocator", "kernel", "cache manager", "block table")
+        for key in ("scheduler", "allocator", "kernel", "cache manager", "block table", "eviction", "preemption", "policy")
     ):
+        sub_hits += 2
+    if _SUBMECHANISM_STRONG_METHOD_RE.search(statement):
+        sub_hits += 3
+    # Bias policy/scheduling/kernel nodes to submechanism unless primitive/system
+    # evidence is substantially stronger.
+    if _is_low_level_method(claim) and primitive_hits < 4:
         sub_hits += 2
 
     # Prompt/hint default first.
@@ -623,12 +675,14 @@ def _method_abstraction_level(claim: RawClaim) -> str:
         default_level = "system_realization"
 
     # Deterministic override second.
-    if sub_hits >= 3 and system_hits <= primitive_hits + 1:
+    if sub_hits >= max(3, system_hits):
         return "submechanism"
-    if system_hits >= primitive_hits + 1 and system_hits >= 2:
-        return "system_realization"
-    if primitive_hits >= max(2, system_hits):
+    if primitive_hits >= max(3, system_hits + 1):
         return "primitive"
+    if system_hits >= max(3, primitive_hits + 2) and sub_hits <= system_hits:
+        return "system_realization"
+    if _SUBMECHANISM_STRONG_METHOD_RE.search(statement):
+        return "submechanism"
     if _is_low_level_method(claim):
         return "submechanism"
     return default_level
@@ -644,6 +698,11 @@ def _is_primitive_method(claim: RawClaim) -> bool:
 
 def _has_explicit_instantiation_evidence(system_claim: RawClaim, primitive_claim: RawClaim) -> bool:
     if system_claim.claim_id == primitive_claim.claim_id:
+        return False
+    if (
+        _method_abstraction_level(system_claim) != "system_realization"
+        or _method_abstraction_level(primitive_claim) != "primitive"
+    ):
         return False
 
     system_text = _clean_text(system_claim.statement).lower()
@@ -662,22 +721,11 @@ def _has_explicit_instantiation_evidence(system_claim: RawClaim, primitive_claim
     mentions_primitive_name = any(entity in system_text for entity in primitive_entities)
     token_overlap = bool(_claim_tokens(system_claim.statement) & primitive_tokens)
     verb_signal = bool(_METHOD_INSTANTIATION_RE.search(system_text))
-    seed_link = (
-        (system_claim.structural_hints is not None and system_claim.structural_hints.elaborates_seed_id == primitive_claim.claim_id)
-        or (
-            primitive_claim.structural_hints is not None
-            and primitive_claim.structural_hints.elaborates_seed_id == system_claim.claim_id
-        )
-    )
+    # Treat explicit primitive-name mention as proxy overlap when entity extraction
+    # omits one side.
+    core_entity_overlap = bool(shared_entities) or (mentions_primitive_name and token_overlap)
     section_progression = _section_rank(system_claim.source_section) >= _section_rank(primitive_claim.source_section)
-
-    if seed_link:
-        return True
-    if verb_signal and (mentions_primitive_name or shared_entities):
-        return True
-    if mentions_primitive_name and token_overlap and section_progression:
-        return True
-    return False
+    return core_entity_overlap and verb_signal and section_progression
 
 
 def _is_observational_method_statement(claim: RawClaim) -> bool:
@@ -687,6 +735,41 @@ def _is_observational_method_statement(claim: RawClaim) -> bool:
     if _ACTIVE_METHOD_AGENCY_RE.search(statement):
         return False
     return True
+
+
+def _should_retag_assumption_as_method(claim: RawClaim) -> bool:
+    if claim.claim_type != ClaimType.assumption:
+        return False
+    statement = _clean_text(claim.statement).lower()
+    if not statement:
+        return False
+    if _ASSUMPTION_CONDITIONAL_RE.search(statement):
+        return False
+    if not _ASSUMPTION_MECHANISM_RE.search(statement):
+        return False
+    mechanism_hits = len(_claim_tokens(statement) & _SUBMECHANISM_METHOD_TOKENS)
+    return mechanism_hits >= 2 or _SUBMECHANISM_STRONG_METHOD_RE.search(statement) is not None
+
+
+def _retag_assumption_to_method(claim: RawClaim) -> RawClaim:
+    hints = claim.structural_hints or ClaimStructuralHints()
+    local_role = hints.local_role
+    if local_role in {None, ClaimLocalRole.assumption}:
+        statement = _clean_text(claim.statement).lower()
+        if _SUBMECHANISM_STRONG_METHOD_RE.search(statement):
+            local_role = ClaimLocalRole.implementation_detail
+        else:
+            local_role = ClaimLocalRole.mechanism
+    return claim.model_copy(
+        update={
+            "claim_type": ClaimType.method,
+            "structural_hints": ClaimStructuralHints(
+                elaborates_seed_id=hints.elaborates_seed_id,
+                local_role=local_role,
+                preferred_parent_type=ParentPreference.method,
+            ),
+        }
+    )
 
 
 def _context_problem_signal_count(claim: RawClaim) -> int:
@@ -740,12 +823,42 @@ def _depends_on_descendant(claim_id: str, dependency_id: str, parent_by_claim: d
     return False
 
 
+def _highest_system_realization_ancestor(
+    claim_id: str,
+    parent_by_claim: dict[str, str],
+    claim_by_id: dict[str, RawClaim],
+) -> str | None:
+    current = parent_by_claim.get(claim_id)
+    visited: set[str] = set()
+    highest: str | None = None
+    while current and current not in visited:
+        visited.add(current)
+        candidate = claim_by_id.get(current)
+        if candidate is not None and candidate.claim_type == ClaimType.method:
+            if _method_abstraction_level(candidate) == "system_realization":
+                highest = current
+        current = parent_by_claim.get(current)
+    return highest
+
+
 def _is_top_level_method(claim: RawClaim) -> bool:
     return _method_abstraction_level(claim) in {"primitive", "system_realization"}
 
 
 def _is_submechanism_method(claim: RawClaim) -> bool:
     return _method_abstraction_level(claim) == "submechanism"
+
+
+def _is_top_level_instantiation_pair(child_claim: RawClaim, parent_claim: RawClaim) -> bool:
+    if child_claim.claim_type != ClaimType.method or parent_claim.claim_type != ClaimType.method:
+        return False
+    child_level = _method_abstraction_level(child_claim)
+    parent_level = _method_abstraction_level(parent_claim)
+    if {child_level, parent_level} != {"primitive", "system_realization"}:
+        return False
+    system_claim = child_claim if child_level == "system_realization" else parent_claim
+    primitive_claim = child_claim if child_level == "primitive" else parent_claim
+    return _has_explicit_instantiation_evidence(system_claim, primitive_claim)
 
 
 def _classify_result_scope(claim: RawClaim) -> str:
@@ -782,6 +895,32 @@ def _classify_result_scope(claim: RawClaim) -> str:
     return "neutral"
 
 
+def _is_workload_characterization_statement(statement: str) -> bool:
+    if not _WORKLOAD_RESULT_RE.search(statement):
+        return False
+    if not _WORKLOAD_CHARACTERIZATION_RE.search(statement):
+        return False
+    if _TOP_LINE_BASELINE_RE.search(statement):
+        return False
+    if _RESULT_SCOPED_SETTING_RE.search(statement) and _RESULT_PERFORMANCE_RE.search(statement):
+        return False
+    if _RESULT_PERFORMANCE_RE.search(statement):
+        return False
+    return True
+
+
+def _is_headline_result_statement(statement: str) -> bool:
+    if not _HEADLINE_RESULT_RE.search(statement):
+        return False
+    if not _TOP_LINE_BASELINE_RE.search(statement):
+        return False
+    if _RESULT_SCOPED_SETTING_RE.search(statement):
+        return False
+    if _WORKLOAD_CHARACTERIZATION_RE.search(statement):
+        return False
+    return True
+
+
 def _classify_result_subtype(claim: RawClaim) -> ResultSubtype | None:
     if claim.claim_type != ClaimType.result:
         return None
@@ -789,13 +928,17 @@ def _classify_result_subtype(claim: RawClaim) -> ResultSubtype | None:
     statement = _clean_text(claim.statement).lower()
     if _ABLATED_RESULT_RE.search(statement):
         return ResultSubtype.ablation
-    if _WORKLOAD_RESULT_RE.search(statement):
-        # Workload/content characterization takes precedence over generic constraints.
+    if _is_workload_characterization_statement(statement):
+        # Workload characterization is intentionally strict: data/workload
+        # descriptors only, not scoped comparative performance outcomes.
         return ResultSubtype.workload_characterization
     if _CONSTRAINT_RESULT_RE.search(statement):
         return ResultSubtype.constraint_observation
-    if _HEADLINE_RESULT_RE.search(statement) and _TOP_LINE_BASELINE_RE.search(statement):
+    if _is_headline_result_statement(statement):
         return ResultSubtype.headline_result
+    # Temporary semantic packing: scoped comparative performance outcomes
+    # are represented as mechanism_validation until scoped_result is a
+    # dedicated subtype.
     return ResultSubtype.mechanism_validation
 
 
@@ -1497,6 +1640,133 @@ def _one_liner_or_unspecified(one_liner: OneLiner) -> OneLiner:
     )
 
 
+def _iter_tree_nodes(roots: list[ClaimNode]) -> list[ClaimNode]:
+    nodes: list[ClaimNode] = []
+
+    def walk(items: list[ClaimNode]) -> None:
+        for node in items:
+            nodes.append(node)
+            walk(node.children)
+
+    walk(roots)
+    return nodes
+
+
+def _resolve_label_relabel_tier(config: Any) -> ModelTier:
+    default_tier: ModelTier = "small"
+    pipeline = getattr(config, "pipeline", None)
+    tree_cfg = getattr(pipeline, "tree", None) if pipeline is not None else None
+    raw_tier: Any = None
+    if isinstance(tree_cfg, Mapping):
+        raw_tier = tree_cfg.get("canonical_label_relabel_tier")
+    elif isinstance(config, Mapping):
+        pipeline_cfg = config.get("pipeline")
+        if isinstance(pipeline_cfg, Mapping):
+            raw_tree = pipeline_cfg.get("tree")
+            if isinstance(raw_tree, Mapping):
+                raw_tier = raw_tree.get("canonical_label_relabel_tier")
+
+    if isinstance(raw_tier, str) and raw_tier in _VALID_TIERS:
+        return cast(ModelTier, raw_tier)
+    return default_tier
+
+
+def _build_label_relabel_prompt(nodes: list[ClaimNode]) -> list[dict[str, str]]:
+    lines = [
+        f"- {node.claim_id} | {node.claim_type.value} | {node.normalized_statement}"
+        for node in nodes
+    ]
+    return [
+        {"role": "system", "content": LABEL_RELABEL_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": "Rewrite labels for the following claim nodes:\n\n"
+            + "\n".join(lines)
+            + "\n\nReturn one label per claim_id.",
+        },
+    ]
+
+
+def _sanitize_label_candidate(value: str) -> str:
+    candidate = _clean_text(value).lower()
+    candidate = re.sub(r"[^a-z0-9_]+", "_", candidate)
+    candidate = re.sub(r"_+", "_", candidate).strip("_")
+    return candidate
+
+
+def _label_candidate_valid(candidate: str, claim: ClaimNode) -> bool:
+    if not candidate:
+        return False
+    if not re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", candidate):
+        return False
+    tokens = [token for token in candidate.split("_") if token]
+    if not (2 <= len(tokens) <= 6):
+        return False
+    for token in tokens:
+        if token in _CANONICAL_LABEL_BLOCKLIST and token not in _LABEL_REWRITE_ALLOWED_SYSTEM_TOKENS:
+            return False
+        if token in _LABEL_REWRITE_EVAL_TOKENS and claim.claim_type != ClaimType.result:
+            return False
+    return True
+
+
+def _rebuild_tree_with_labels(roots: list[ClaimNode], label_by_id: dict[str, str]) -> list[ClaimNode]:
+    def rebuild(node: ClaimNode) -> ClaimNode:
+        return node.model_copy(
+            update={
+                "canonical_label": label_by_id.get(node.claim_id, node.canonical_label),
+                "children": [rebuild(child) for child in node.children],
+            }
+        )
+
+    return [rebuild(root) for root in roots]
+
+
+async def _relabel_canonical_labels(
+    roots: list[ClaimNode],
+    config: Any,
+) -> list[ClaimNode]:
+    nodes = _iter_tree_nodes(roots)
+    if not nodes:
+        return roots
+
+    by_id = {node.claim_id: node for node in nodes}
+    proposed: dict[str, str] = {}
+    try:
+        result = await call_model(
+            tier=_resolve_label_relabel_tier(config),
+            messages=_build_label_relabel_prompt(nodes),
+            response_schema=CanonicalLabelOutput,
+            config=config,
+        )
+    except Exception:
+        result = None
+
+    if isinstance(result, CanonicalLabelOutput):
+        for assignment in result.labels:
+            claim_id = _clean_text(assignment.claim_id)
+            if claim_id not in by_id:
+                continue
+            candidate = _sanitize_label_candidate(assignment.canonical_label)
+            if _label_candidate_valid(candidate, by_id[claim_id]):
+                proposed[claim_id] = candidate
+
+    final_labels: dict[str, str] = {}
+    used: set[str] = set()
+    for node in nodes:
+        base = proposed.get(node.claim_id, node.canonical_label)
+        if not _label_candidate_valid(base, node):
+            base = node.canonical_label
+        label = base
+        suffix = 2
+        while label in used:
+            label = f"{base}_{suffix}"
+            suffix += 1
+        used.add(label)
+        final_labels[node.claim_id] = label
+    return _rebuild_tree_with_labels(roots, final_labels)
+
+
 def _compaction_support_detail(
     demoted_claim: RawClaim,
     *,
@@ -1532,6 +1802,14 @@ def _build_tree_nodes(
             continue
         claim_by_id[claim.claim_id] = claim
         claim_order.append(claim.claim_id)
+
+    # Retag mechanism-descriptive assumptions into methods before structure
+    # assignment so abstraction and parent grammar stay coherent.
+    for claim_id in claim_order:
+        claim = claim_by_id[claim_id]
+        if not _should_retag_assumption_as_method(claim):
+            continue
+        claim_by_id[claim_id] = _retag_assumption_to_method(claim)
 
     facets_by_id = {faceted_claim.claim.claim_id: faceted_claim for faceted_claim in faceted}
     all_method_claims = [claim_by_id[claim_id] for claim_id in claim_order if claim_by_id[claim_id].claim_type == ClaimType.method]
@@ -1957,6 +2235,37 @@ def _build_tree_nodes(
         parent_by_claim[claim_id] = best_method_id
         child_count[best_method_id] = child_count.get(best_method_id, 0) + 1
 
+    # Invariant: headline results cannot remain attached under submechanisms.
+    for claim_id in claim_order:
+        claim = claim_by_id[claim_id]
+        if claim.claim_type != ClaimType.result:
+            continue
+        if _classify_result_subtype(claim) != ResultSubtype.headline_result:
+            continue
+        current_parent = parent_by_claim.get(claim_id)
+        if current_parent is None:
+            continue
+        parent_claim = claim_by_id.get(current_parent)
+        if parent_claim is None or parent_claim.claim_type != ClaimType.method:
+            continue
+        if not _is_submechanism_method(parent_claim):
+            continue
+
+        reattach_parent = _highest_system_realization_ancestor(claim_id, parent_by_claim, claim_by_id)
+        if reattach_parent is None:
+            system_methods = [method for method in parentable_method_claims if _is_system_realization_method(method)]
+            if system_methods:
+                best_system_id, score = _best_method_parent(claim, system_methods)
+                if best_system_id is not None and score >= 0:
+                    reattach_parent = best_system_id
+        if reattach_parent is None or reattach_parent == current_parent:
+            continue
+        if _would_create_parent_cycle(claim_id, reattach_parent, parent_by_claim):
+            continue
+        child_count[current_parent] = max(0, child_count.get(current_parent, 1) - 1)
+        parent_by_claim[claim_id] = reattach_parent
+        child_count[reattach_parent] = child_count.get(reattach_parent, 0) + 1
+
     # Subtree-local restatement compaction for method parent-child pairs.
     compaction_index = 1
     changed = True
@@ -2069,6 +2378,21 @@ def _build_tree_nodes(
             cleaned.append(dependency_id)
         depends_by_claim[claim_id] = cleaned
 
+    # For primitive/system instantiation, structure encodes the relation and
+    # depends_on should not mirror the same parent edge.
+    for claim_id, parent_id in list(parent_by_claim.items()):
+        child_claim = claim_by_id.get(claim_id)
+        parent_claim = claim_by_id.get(parent_id)
+        if child_claim is None or parent_claim is None:
+            continue
+        if not _is_top_level_instantiation_pair(child_claim, parent_claim):
+            continue
+        depends_by_claim[claim_id] = [
+            dependency_id
+            for dependency_id in depends_by_claim.get(claim_id, [])
+            if dependency_id != parent_id
+        ]
+
     for claim_id in claim_order:
         claim = claim_by_id[claim_id]
         if claim.claim_type not in {ClaimType.result, ClaimType.assumption, ClaimType.negative}:
@@ -2083,6 +2407,14 @@ def _build_tree_nodes(
 
     for claim_id, parent_id in parent_by_claim.items():
         if not depends_by_claim[claim_id]:
+            child_claim = claim_by_id.get(claim_id)
+            parent_claim = claim_by_id.get(parent_id)
+            if (
+                child_claim is not None
+                and parent_claim is not None
+                and _is_top_level_instantiation_pair(child_claim, parent_claim)
+            ):
+                continue
             depends_by_claim[claim_id] = [parent_id]
 
     abstraction_by_claim: dict[str, AbstractionLevel] = {}
@@ -2412,6 +2744,7 @@ async def assemble_tree_deterministic(
         final_assignments,
         parent_hints=parent_hints,
     )
+    claim_tree = await _relabel_canonical_labels(claim_tree, config)
     merged_support_details = [*list(support_details or []), *compacted_support_details]
 
     return PaperDecomposition(
