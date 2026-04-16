@@ -23,6 +23,7 @@ from .prompts.section import (
 )
 from .prompts.tree import assemble_tree, assemble_tree_deterministic
 from .schema import (
+    AbstractionLevel,
     ClaimGroup,
     ClaimLocalRole,
     ClaimNode,
@@ -36,6 +37,8 @@ from .schema import (
     PaperSkeletonCandidate,
     ParentPreference,
     RawClaim,
+    ResultSubtype,
+    SemanticRole,
     SectionArgumentCandidate,
     Section,
     SupportDetail,
@@ -609,6 +612,181 @@ def _tree_stats(nodes: list[ClaimNode]) -> tuple[int, int, int]:
     return total_nodes, depth, edges
 
 
+def _iter_tree_nodes(nodes: list[ClaimNode]) -> list[ClaimNode]:
+    ordered: list[ClaimNode] = []
+
+    def walk(node: ClaimNode) -> None:
+        ordered.append(node)
+        for child in node.children:
+            walk(child)
+
+    for root in nodes:
+        walk(root)
+    return ordered
+
+
+def _dependency_contradiction_count(nodes: list[ClaimNode]) -> int:
+    parent_by_child: dict[str, str | None] = {}
+    node_by_id: dict[str, ClaimNode] = {}
+
+    def walk(node: ClaimNode, parent_id: str | None) -> None:
+        parent_by_child[node.claim_id] = parent_id
+        node_by_id[node.claim_id] = node
+        for child in node.children:
+            walk(child, node.claim_id)
+
+    for root in nodes:
+        walk(root, None)
+
+    def is_descendant(ancestor_id: str, maybe_descendant_id: str) -> bool:
+        current = parent_by_child.get(maybe_descendant_id)
+        visited: set[str] = set()
+        while current and current not in visited:
+            if current == ancestor_id:
+                return True
+            visited.add(current)
+            current = parent_by_child.get(current)
+        return False
+
+    contradictions = 0
+    for node in node_by_id.values():
+        for dep_id in node.depends_on:
+            if dep_id == node.claim_id:
+                contradictions += 1
+                continue
+            if dep_id not in node_by_id:
+                contradictions += 1
+                continue
+            if is_descendant(node.claim_id, dep_id):
+                contradictions += 1
+                continue
+    return contradictions
+
+
+def _label_instability_rate(nodes: list[ClaimNode]) -> float:
+    flattened = _iter_tree_nodes(nodes)
+    if len(flattened) < 2:
+        return 0.0
+
+    def normalized_tokens(text: str) -> set[str]:
+        return _statement_tokens(text)
+
+    unstable_pairs = 0
+    compared_pairs = 0
+    for idx, left in enumerate(flattened):
+        left_tokens = normalized_tokens(left.normalized_statement)
+        for right in flattened[idx + 1 :]:
+            right_tokens = normalized_tokens(right.normalized_statement)
+            if not left_tokens or not right_tokens:
+                continue
+            union = left_tokens | right_tokens
+            if not union:
+                continue
+            jaccard = len(left_tokens & right_tokens) / len(union)
+            if jaccard < 0.92:
+                continue
+            compared_pairs += 1
+            if left.canonical_label != right.canonical_label:
+                unstable_pairs += 1
+    if compared_pairs == 0:
+        return 0.0
+    return round(unstable_pairs / compared_pairs, 3)
+
+
+def _scorecard(
+    *,
+    decomposition: PaperDecomposition,
+    pre_tree_promoted_count: int,
+) -> dict[str, float | int]:
+    nodes = _iter_tree_nodes(decomposition.claim_tree)
+    method_nodes = [node for node in nodes if node.claim_type == ClaimType.method]
+    result_nodes = [node for node in nodes if node.claim_type == ClaimType.result]
+    anchored_support = [detail for detail in decomposition.support_details if detail.anchor_claim_id]
+    promotable_unresolved = [
+        detail
+        for detail in decomposition.support_details
+        if detail.promotable and not detail.anchor_claim_id
+    ]
+    method_abstraction_covered = [
+        node
+        for node in method_nodes
+        if node.abstraction_level
+        in {
+            AbstractionLevel.primitive,
+            AbstractionLevel.system_realization,
+            AbstractionLevel.submechanism,
+        }
+    ]
+    result_subtyped = [node for node in result_nodes if node.result_subtype is not None]
+
+    return {
+        "promoted_nodes": len(nodes),
+        "root_count": len(decomposition.claim_tree),
+        "subtree_compression_ratio": round(
+            len(nodes) / max(1, pre_tree_promoted_count),
+            3,
+        ),
+        "method_abstraction_coverage": round(
+            len(method_abstraction_covered) / max(1, len(method_nodes)),
+            3,
+        ),
+        "result_subtype_coverage": round(
+            len(result_subtyped) / max(1, len(result_nodes)),
+            3,
+        ),
+        "dependency_contradictions": _dependency_contradiction_count(
+            decomposition.claim_tree
+        ),
+        "support_anchor_coverage": round(
+            len(anchored_support) / max(1, len(decomposition.support_details)),
+            3,
+        ),
+        "unresolved_promotable_support_count": len(promotable_unresolved),
+        "label_collision_normalization_instability_rate": _label_instability_rate(
+            decomposition.claim_tree
+        ),
+    }
+
+
+def _over_pruning_warnings(
+    *,
+    argument_candidates: list[SectionArgumentCandidate],
+    promoted_claims: list[RawClaim],
+    decomposition: PaperDecomposition,
+) -> list[str]:
+    if not argument_candidates:
+        return []
+
+    candidate_count_by_section: Counter[str] = Counter(
+        candidate.source_section.strip().lower()
+        for candidate in argument_candidates
+        if candidate.source_section.strip()
+    )
+    promoted_source_by_id = {
+        claim.claim_id: claim.source_section.strip().lower()
+        for claim in promoted_claims
+        if claim.source_section.strip()
+    }
+    retained_ids = {node.claim_id for node in _iter_tree_nodes(decomposition.claim_tree)}
+    retained_count_by_section: Counter[str] = Counter(
+        promoted_source_by_id[claim_id]
+        for claim_id in retained_ids
+        if claim_id in promoted_source_by_id
+    )
+
+    warnings: list[str] = []
+    for section_key, candidate_count in sorted(candidate_count_by_section.items()):
+        if candidate_count < 3:
+            continue
+        retained = retained_count_by_section.get(section_key, 0)
+        pruned_ratio = 1.0 - (retained / max(1, candidate_count))
+        if pruned_ratio > 0.70 and retained < 2:
+            warnings.append(
+                f"{section_key}: retained={retained} candidates={candidate_count} pruned_ratio={pruned_ratio:.2f}"
+            )
+    return warnings
+
+
 def _shorten(text: str, limit: int = 180) -> str:
     cleaned = " ".join(text.split())
     if len(cleaned) <= limit:
@@ -625,11 +803,82 @@ def _build_fallback_decomposition(
     extraction_cost_usd: float,
 ) -> PaperDecomposition:
     facets_by_id = {faceted.claim.claim_id: faceted for faceted in faceted_claims}
+    used_labels: set[str] = set()
+
+    def fallback_abstraction(claim: RawClaim) -> AbstractionLevel:
+        if claim.claim_type == ClaimType.context:
+            return AbstractionLevel.problem
+        if claim.claim_type != ClaimType.method:
+            return AbstractionLevel.not_applicable
+        hints = claim.structural_hints
+        if hints is not None and hints.local_role == ClaimLocalRole.implementation_detail:
+            return AbstractionLevel.submechanism
+        return AbstractionLevel.system_realization
+
+    def fallback_result_subtype(claim: RawClaim) -> ResultSubtype | None:
+        if claim.claim_type != ClaimType.result:
+            return None
+        lowered = claim.statement.lower()
+        if "ablation" in lowered or "without" in lowered:
+            return ResultSubtype.ablation
+        if any(token in lowered for token in ("workload", "dataset", "distribution", "trace")):
+            return ResultSubtype.workload_characterization
+        if any(token in lowered for token in ("overhead", "bound", "constraint", "oom")):
+            return ResultSubtype.constraint_observation
+        if any(token in lowered for token in ("throughput", "latency", "speedup", "outperform")):
+            return ResultSubtype.headline_result
+        return ResultSubtype.mechanism_validation
+
+    def fallback_semantic_role(claim: RawClaim, abstraction: AbstractionLevel, subtype: ResultSubtype | None) -> SemanticRole:
+        if claim.claim_type == ClaimType.context:
+            return SemanticRole.problem
+        if claim.claim_type == ClaimType.method:
+            if abstraction == AbstractionLevel.submechanism:
+                return SemanticRole.method_support
+            return SemanticRole.method_core
+        if claim.claim_type == ClaimType.result:
+            if subtype == ResultSubtype.headline_result:
+                return SemanticRole.headline_result
+            return SemanticRole.scoped_result
+        if claim.claim_type == ClaimType.assumption:
+            return SemanticRole.assumption
+        return SemanticRole.limitation
+
+    def fallback_normalized_statement(statement: str) -> str:
+        normalized = _collapse_ws(statement)
+        if normalized and normalized[-1] not in ".!?":
+            normalized = f"{normalized}."
+        return normalized
+
+    def fallback_canonical_label(claim: RawClaim, normalized_statement: str) -> str:
+        tokens = [
+            token
+            for token in _CLAIM_TOKEN_SPLIT_RE.split(normalized_statement.lower())
+            if token and len(token) > 2 and token not in _CLAIM_STOPWORDS and not token.isdigit()
+        ]
+        base = "_".join(tokens[:6]) or f"{claim.claim_type.value}_claim"
+        candidate = base
+        suffix = 2
+        while candidate in used_labels:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        used_labels.add(candidate)
+        return candidate
 
     def make_node(claim: RawClaim) -> ClaimNode:
+        abstraction = fallback_abstraction(claim)
+        result_subtype = fallback_result_subtype(claim)
+        semantic_role = fallback_semantic_role(claim, abstraction, result_subtype)
+        normalized_statement = fallback_normalized_statement(claim.statement)
+        canonical_label = fallback_canonical_label(claim, normalized_statement)
         return ClaimNode(
             claim_id=claim.claim_id,
             claim_type=claim.claim_type,
+            abstraction_level=abstraction,
+            semantic_role=semantic_role,
+            canonical_label=canonical_label,
+            normalized_statement=normalized_statement,
+            result_subtype=result_subtype,
             statement=claim.statement,
             evidence=list(claim.evidence),
             facets=facets_by_id.get(claim.claim_id),
@@ -1249,11 +1498,35 @@ async def decompose_paper(pdf_path: str, config_path: str = "config.yaml") -> Pa
         total_cost = float(phase5_after.get("total_cost_usd", 0.0))
         decomposition = decomposition.model_copy(update={"extraction_cost_usd": total_cost})
         node_count, depth, edge_count = _tree_stats(decomposition.claim_tree)
+        scorecard = _scorecard(
+            decomposition=decomposition,
+            pre_tree_promoted_count=len(deduplicated_claims),
+        )
+        over_pruning = _over_pruning_warnings(
+            argument_candidates=argument_candidates,
+            promoted_claims=deduplicated_claims,
+            decomposition=decomposition,
+        )
         console.print(
             f"Phase 5 tree nodes={node_count} depth={depth} edges={edge_count} "
             f"| support_details={len(decomposition.support_details)} "
             f"| cost +${_cost_delta(phase5_before, phase5_after):.4f}"
         )
+        console.print(
+            "Phase 5 scorecard: "
+            f"promoted_nodes={scorecard['promoted_nodes']} "
+            f"roots={scorecard['root_count']} "
+            f"compression={scorecard['subtree_compression_ratio']} "
+            f"method_cov={scorecard['method_abstraction_coverage']} "
+            f"result_cov={scorecard['result_subtype_coverage']} "
+            f"dep_contradictions={scorecard['dependency_contradictions']} "
+            f"support_anchor_cov={scorecard['support_anchor_coverage']} "
+            f"unresolved_promotable={scorecard['unresolved_promotable_support_count']} "
+            f"label_instability={scorecard['label_collision_normalization_instability_rate']}"
+        )
+        if over_pruning:
+            for warning in over_pruning:
+                console.print(f"[yellow]Over-pruning warning[/yellow] {warning}")
 
     output_dir = _resolve_output_dir(config)
     output_dir.mkdir(parents=True, exist_ok=True)

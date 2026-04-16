@@ -23,13 +23,19 @@ import paper_decomposer.prompts.dedup as dedup_module
 import paper_decomposer.prompts.tree as tree_module
 from paper_decomposer.prompts.seed import repair_skeleton
 from paper_decomposer.schema import (
+    AbstractionLevel,
     ClaimLocalRole,
+    ClaimNode,
     ClaimStructuralHints,
     ClaimType,
+    OneLiner,
+    PaperDecomposition,
     PaperMetadata,
     PaperSkeletonCandidate,
     ParentPreference,
     RawClaim,
+    ResultSubtype,
+    SemanticRole,
     Section,
     SectionArgumentCandidate,
     SupportDetail,
@@ -297,3 +303,108 @@ def test_assemble_tree_deterministic_respects_ambiguity_budget(monkeypatch: pyte
 
     if captured_sizes:
         assert captured_sizes[0] <= 1
+
+
+def test_scorecard_reports_key_metrics() -> None:
+    result_node = ClaimNode(
+        claim_id="R1",
+        claim_type=ClaimType.result,
+        abstraction_level=AbstractionLevel.not_applicable,
+        semantic_role=SemanticRole.headline_result,
+        canonical_label="throughput_improvement",
+        normalized_statement="Improves throughput by 2x over baseline.",
+        result_subtype=ResultSubtype.headline_result,
+        statement="Improves throughput by 2x over baseline.",
+        evidence=[],
+        children=[],
+        depends_on=["M1"],
+    )
+    method_node = ClaimNode(
+        claim_id="M1",
+        claim_type=ClaimType.method,
+        abstraction_level=AbstractionLevel.system_realization,
+        semantic_role=SemanticRole.method_core,
+        canonical_label="paged_kv_block_mapping",
+        normalized_statement="Maps logical KV blocks to physical blocks.",
+        result_subtype=None,
+        statement="Maps logical KV blocks to physical blocks.",
+        evidence=[],
+        children=[result_node],
+        depends_on=[],
+    )
+    decomposition = PaperDecomposition(
+        metadata=PaperMetadata(title="Scorecard", authors=[]),
+        one_liner=OneLiner(achieved="a", via="b", because="c"),
+        claim_tree=[method_node],
+        negative_claims=[],
+        support_details=[
+            SupportDetail(
+                support_detail_id="SD_1",
+                detail_type=SupportDetailType.implementation_fact,
+                text="Detail",
+                source_section="4 Method",
+                anchor_claim_id="M1",
+                candidate_anchor_ids=["M1"],
+                relationship_type=SupportRelationshipType.implements,
+                confidence=0.8,
+                evidence_ids=[],
+                promotable=True,
+            )
+        ],
+        all_artifacts=[],
+        extraction_cost_usd=0.0,
+    )
+
+    scorecard = pipeline_module._scorecard(
+        decomposition=decomposition,
+        pre_tree_promoted_count=3,
+    )
+    assert scorecard["promoted_nodes"] == 2
+    assert scorecard["root_count"] == 1
+    assert scorecard["dependency_contradictions"] == 0
+    assert scorecard["method_abstraction_coverage"] == 1.0
+    assert scorecard["result_subtype_coverage"] == 1.0
+    assert scorecard["support_anchor_coverage"] == 1.0
+
+
+def test_over_pruning_warning_emits_for_heavily_pruned_major_section() -> None:
+    candidates = [
+        _candidate("C1", ClaimType.context, "c", "4 method"),
+        _candidate("M1", ClaimType.method, "m1", "4 method"),
+        _candidate("M2", ClaimType.method, "m2", "4 method"),
+        _candidate("R1", ClaimType.result, "r1", "4 method"),
+        _candidate("R2", ClaimType.result, "r2", "4 method"),
+    ]
+    promoted_claims = [
+        _claim("M1", ClaimType.method, "m1", "4 method"),
+    ]
+    decomposition = PaperDecomposition(
+        metadata=PaperMetadata(title="Pruning", authors=[]),
+        one_liner=OneLiner(achieved="a", via="b", because="c"),
+        claim_tree=[
+            ClaimNode(
+                claim_id="M1",
+                claim_type=ClaimType.method,
+                abstraction_level=AbstractionLevel.system_realization,
+                semantic_role=SemanticRole.method_core,
+                canonical_label="m1",
+                normalized_statement="M1.",
+                result_subtype=None,
+                statement="m1",
+                evidence=[],
+                children=[],
+                depends_on=[],
+            )
+        ],
+        negative_claims=[],
+        support_details=[],
+        all_artifacts=[],
+        extraction_cost_usd=0.0,
+    )
+
+    warnings = pipeline_module._over_pruning_warnings(
+        argument_candidates=candidates,
+        promoted_claims=promoted_claims,
+        decomposition=decomposition,
+    )
+    assert warnings

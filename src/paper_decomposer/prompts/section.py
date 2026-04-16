@@ -212,6 +212,18 @@ _NEGATIVE_CUE_RE = re.compile(
     r"(fail|failed|fails|rejected|reject|limitation|cannot|can't|does not work|too expensive|non-applicable)",
     re.IGNORECASE,
 )
+_ASSUMPTION_CONDITIONAL_RE = re.compile(
+    r"\b(if|when|unless|requires?|depends on|under\b|subject to|only when)\b",
+    re.IGNORECASE,
+)
+_FUTURE_WORK_RE = re.compile(
+    r"\b(future work|we plan to|could be explored|left for future)\b",
+    re.IGNORECASE,
+)
+_NEGATIVE_TARGET_RE = re.compile(
+    r"\b(reject(?:ed)?|limitation|fails?|cannot|can't|too expensive|non-applicable)\b.{0,60}\b(of|for|because|due to|when|under)\b",
+    re.IGNORECASE,
+)
 # Observation/constraint patterns: statements characterising properties, proportions,
 # or capabilities without the paper actively doing anything.  These should default to
 # context or result, never method.
@@ -240,6 +252,11 @@ _ACTIVE_METHOD_AGENCY_RE = re.compile(
     r"\bwe\s+(introduce|propose|present|design|build|implement|allocate|partition|schedule|develop|create|extend|leverage|employ)\b"
     r"|\bour\s+(system|approach|framework|method|design|scheme|algorithm|technique|work)\b"
     r"|\bthis\s+(paper|work)\s+(introduce|propose|present|describe|design|develop)\b",
+    re.IGNORECASE,
+)
+_IMPLICIT_METHOD_AGENCY_RE = re.compile(
+    r"\b(vllm|pagedattention|system|runtime|approach|method|framework|scheduler|allocator|manager)\b.{0,40}\b"
+    r"(uses?|maps?|implements?|allocates?|schedules?|manages?|partitions?|leverages?|employs?)\b",
     re.IGNORECASE,
 )
 _PROCEDURAL_VERB_RE = re.compile(
@@ -765,6 +782,42 @@ def _has_mechanism_signal(claim: RawClaim) -> bool:
     return False
 
 
+def _has_agency_signal(claim: RawClaim) -> bool:
+    statement = claim.statement.lower()
+    return bool(_ACTIVE_METHOD_AGENCY_RE.search(statement) or _IMPLICIT_METHOD_AGENCY_RE.search(statement))
+
+
+def _is_core_context_claim(claim: RawClaim) -> bool:
+    lowered = claim.statement.lower()
+    if not _CONTEXT_CUE_RE.search(lowered):
+        return False
+    # Prefer bottleneck/problem statements over generic framing.
+    return bool(
+        re.search(
+            r"\b(bottleneck|challenge|gap|limitation|insufficient|waste|fragmentation|memory-bound|constraint)\b",
+            lowered,
+        )
+    )
+
+
+def _is_real_assumption_claim(claim: RawClaim) -> bool:
+    lowered = claim.statement.lower()
+    if not _ASSUMPTION_CUE_RE.search(lowered):
+        return False
+    if _FUTURE_WORK_RE.search(lowered):
+        return False
+    return bool(_ASSUMPTION_CONDITIONAL_RE.search(lowered))
+
+
+def _is_real_negative_claim(claim: RawClaim) -> bool:
+    lowered = claim.statement.lower()
+    if not _NEGATIVE_CUE_RE.search(lowered):
+        return False
+    if claim.rejected_what or claim.rejected_why:
+        return True
+    return bool(_NEGATIVE_TARGET_RE.search(lowered))
+
+
 def _has_invariant_or_tradeoff_signal(claim: RawClaim) -> bool:
     lowered = claim.statement.lower()
     if _TRADEOFF_CUE_RE.search(lowered):
@@ -818,6 +871,7 @@ def _passes_section_role_gate(claim: RawClaim, section: Section) -> bool:
         if claim.claim_type == ClaimType.method:
             return (
                 _has_mechanism_signal(claim)
+                and _has_agency_signal(claim)
                 and (_has_key_systems_choice_signal(claim) or _has_invariant_or_tradeoff_signal(claim) or _has_evaluation_finding_signal(claim))
             )
         return claim.claim_type in {ClaimType.result, ClaimType.assumption, ClaimType.negative}
@@ -826,24 +880,40 @@ def _passes_section_role_gate(claim: RawClaim, section: Section) -> bool:
         if claim.claim_type == ClaimType.result:
             return _has_evaluation_finding_signal(claim)
         if claim.claim_type == ClaimType.negative:
-            return bool(_NEGATIVE_CUE_RE.search(claim.statement.lower())) and (
+            return _is_real_negative_claim(claim) and (
                 _has_evaluation_finding_signal(claim) or bool(claim.evidence)
             )
         if claim.claim_type == ClaimType.assumption:
-            return bool(_ASSUMPTION_CUE_RE.search(claim.statement.lower())) and bool(claim.evidence)
+            return _is_real_assumption_claim(claim) and bool(claim.evidence)
         return False
 
     if role in {RhetoricalRole.method, RhetoricalRole.theory}:
         if claim.claim_type == ClaimType.method:
             return (
-                _has_mechanism_signal(claim)
-                or _has_invariant_or_tradeoff_signal(claim)
-                or _has_key_systems_choice_signal(claim)
-                or _has_evaluation_finding_signal(claim)
+                _has_agency_signal(claim)
+                and (
+                    _has_mechanism_signal(claim)
+                    or _has_invariant_or_tradeoff_signal(claim)
+                    or _has_key_systems_choice_signal(claim)
+                    or _has_evaluation_finding_signal(claim)
+                )
             )
         if claim.claim_type == ClaimType.result:
             return _has_evaluation_finding_signal(claim)
-        return claim.claim_type in {ClaimType.assumption, ClaimType.negative}
+        if claim.claim_type == ClaimType.assumption:
+            return _is_real_assumption_claim(claim)
+        if claim.claim_type == ClaimType.negative:
+            return _is_real_negative_claim(claim)
+        return False
+
+    if role == RhetoricalRole.discussion:
+        if claim.claim_type == ClaimType.assumption:
+            return _is_real_assumption_claim(claim)
+        if claim.claim_type == ClaimType.negative:
+            return _is_real_negative_claim(claim)
+        if claim.claim_type == ClaimType.context:
+            return _is_core_context_claim(claim)
+        return claim.claim_type == ClaimType.result
 
     return True
 
@@ -1018,11 +1088,19 @@ def _is_argument_candidate(claim: RawClaim, section: Section) -> bool:
     if not _passes_section_role_gate(claim, section):
         return False
 
-    if claim.claim_type in {ClaimType.context, ClaimType.result, ClaimType.assumption, ClaimType.negative}:
-        return True
+    if claim.claim_type == ClaimType.context:
+        return _is_core_context_claim(claim)
+    if claim.claim_type == ClaimType.result:
+        return _has_evaluation_finding_signal(claim) or bool(claim.evidence)
+    if claim.claim_type == ClaimType.assumption:
+        return _is_real_assumption_claim(claim)
+    if claim.claim_type == ClaimType.negative:
+        return _is_real_negative_claim(claim)
 
     # For METHOD claims, require argumentative force beyond local operation details.
     if claim.claim_type == ClaimType.method:
+        if not _has_agency_signal(claim):
+            return False
         if _has_key_systems_choice_signal(claim):
             return True
         if _has_invariant_or_tradeoff_signal(claim):

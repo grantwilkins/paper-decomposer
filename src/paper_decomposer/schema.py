@@ -185,6 +185,32 @@ class ClaimType(str, Enum):
     negative = "negative"
 
 
+class AbstractionLevel(str, Enum):
+    problem = "problem"
+    primitive = "primitive"
+    system_realization = "system_realization"
+    submechanism = "submechanism"
+    not_applicable = "not_applicable"
+
+
+class SemanticRole(str, Enum):
+    problem = "problem"
+    method_core = "method_core"
+    method_support = "method_support"
+    headline_result = "headline_result"
+    scoped_result = "scoped_result"
+    assumption = "assumption"
+    limitation = "limitation"
+
+
+class ResultSubtype(str, Enum):
+    headline_result = "headline_result"
+    mechanism_validation = "mechanism_validation"
+    ablation = "ablation"
+    workload_characterization = "workload_characterization"
+    constraint_observation = "constraint_observation"
+
+
 class ClaimLocalRole(str, Enum):
     top_level = "top_level"
     mechanism = "mechanism"
@@ -843,6 +869,11 @@ class ClaimNode(BaseModel):
 
     claim_id: str
     claim_type: ClaimType
+    abstraction_level: AbstractionLevel
+    semantic_role: SemanticRole
+    canonical_label: str
+    normalized_statement: str
+    result_subtype: ResultSubtype | None = None
     statement: str
     evidence: list[EvidencePointer] = Field(default_factory=list)
     facets: FacetedClaim | None = None
@@ -850,6 +881,34 @@ class ClaimNode(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     rejected_what: str | None = None
     rejected_why: str | None = None
+
+    @field_validator("canonical_label")
+    @classmethod
+    def _validate_canonical_label(cls, value: Any) -> str:
+        label = _coerce_string(value)
+        if not label:
+            raise ValueError("canonical_label must be non-empty")
+        if not re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", label):
+            raise ValueError(
+                "canonical_label must match ^[a-z0-9]+(?:_[a-z0-9]+)*$"
+            )
+        return label
+
+    @field_validator("normalized_statement")
+    @classmethod
+    def _validate_normalized_statement(cls, value: Any) -> str:
+        normalized = _coerce_string(value)
+        if not normalized:
+            raise ValueError("normalized_statement must be non-empty")
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_result_subtype(self) -> "ClaimNode":
+        if self.claim_type == ClaimType.result and self.result_subtype is None:
+            raise ValueError("result_subtype is required for result claims")
+        if self.claim_type != ClaimType.result and self.result_subtype is not None:
+            raise ValueError("result_subtype must be null for non-result claims")
+        return self
 
 
 class OneLiner(BaseModel):
@@ -908,6 +967,22 @@ class PaperDecomposition(BaseModel):
     all_artifacts: list[EvidenceArtifact] = Field(default_factory=list)
     extraction_cost_usd: float = 0.0
 
+    @model_validator(mode="after")
+    def _validate_unique_canonical_labels(self) -> "PaperDecomposition":
+        seen: set[str] = set()
+
+        def walk(nodes: list[ClaimNode]) -> None:
+            for node in nodes:
+                if node.canonical_label in seen:
+                    raise ValueError(
+                        f"canonical_label must be unique within paper: {node.canonical_label}"
+                    )
+                seen.add(node.canonical_label)
+                walk(node.children)
+
+        walk(self.claim_tree)
+        return self
+
 
 __all__ = [
     "ApiConfig",
@@ -921,6 +996,9 @@ __all__ = [
     "RuntimePipelineConfig",
     "AppSettings",
     "ClaimType",
+    "AbstractionLevel",
+    "SemanticRole",
+    "ResultSubtype",
     "ClaimLocalRole",
     "ParentPreference",
     "SupportDetailType",

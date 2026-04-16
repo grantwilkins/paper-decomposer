@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from ..models import call_model
 from ..schema import (
+    AbstractionLevel,
     AmbiguityResolutionOutput,
     ClaimLocalRole,
     ClaimGroup,
@@ -21,6 +22,11 @@ from ..schema import (
     PaperMetadata,
     ParentPreference,
     RawClaim,
+    ResultSubtype,
+    SemanticRole,
+    SupportDetail,
+    SupportDetailType,
+    SupportRelationshipType,
     TreeAssemblyOutput,
     TreeNodeAssignment,
 )
@@ -342,6 +348,63 @@ _ACTIVE_METHOD_AGENCY_RE = re.compile(
     r"|\bthis\s+(paper|work)\s+(introduce|propose|present|describe|design|develop)\b",
     re.IGNORECASE,
 )
+
+_ABLATED_RESULT_RE = re.compile(
+    r"\b(ablation|remove[sd]?|without\b|disabled?|turn(?:ed)? off|w/o)\b",
+    re.IGNORECASE,
+)
+_WORKLOAD_RESULT_RE = re.compile(
+    r"\b(workload|trace|distribution|dataset|sharegpt|alpaca|input length|output length|prompt length|request profile|request mix)\b",
+    re.IGNORECASE,
+)
+_CONSTRAINT_RESULT_RE = re.compile(
+    r"\b(overhead|bottleneck|bound|memory[- ]bound|latency overhead|constraint|limited by|exhausted|oom|out of memory|pcie)\b",
+    re.IGNORECASE,
+)
+_HEADLINE_RESULT_RE = re.compile(
+    r"\b(throughput|request rates?|latency|speedup|outperform|higher throughput|same latency|end[- ]to[- ]end)\b",
+    re.IGNORECASE,
+)
+_NORMALIZE_STATEMENT_PREFIX_RE = re.compile(
+    r"^\s*(we|our system|our approach|this paper|this work)\s+"
+    r"(introduce|introduces|propose|proposes|present|presents|show|shows|demonstrate|demonstrates|implement|implements|design|designs)\s+",
+    re.IGNORECASE,
+)
+_NORMALIZE_RHETORIC_RE = re.compile(
+    r"\b(in this paper|we show that|we find that|we demonstrate that|it is important to note that)\b",
+    re.IGNORECASE,
+)
+_CANONICAL_LABEL_BLOCKLIST = {
+    "vllm",
+    "paper",
+    "orca",
+    "fastertransformer",
+    "alpaca",
+    "sharegpt",
+    "dataset",
+    "baseline",
+}
+_CANONICAL_LABEL_VERB_WEIGHTS = {
+    "allocate",
+    "allocation",
+    "map",
+    "mapping",
+    "share",
+    "sharing",
+    "evict",
+    "eviction",
+    "schedule",
+    "scheduler",
+    "recompute",
+    "swapping",
+    "swap",
+    "partition",
+    "paged",
+    "attention",
+    "throughput",
+    "latency",
+    "memory",
+}
 
 
 def _claim_tokens(text: str) -> set[str]:
@@ -717,6 +780,136 @@ def _classify_result_scope(claim: RawClaim) -> str:
     if submechanism_score >= top_level_score + 1 and submechanism_score > 0:
         return "submechanism"
     return "neutral"
+
+
+def _classify_result_subtype(claim: RawClaim) -> ResultSubtype | None:
+    if claim.claim_type != ClaimType.result:
+        return None
+
+    statement = _clean_text(claim.statement).lower()
+    if _ABLATED_RESULT_RE.search(statement):
+        return ResultSubtype.ablation
+    if _WORKLOAD_RESULT_RE.search(statement):
+        # Workload/content characterization takes precedence over generic constraints.
+        return ResultSubtype.workload_characterization
+    if _CONSTRAINT_RESULT_RE.search(statement):
+        return ResultSubtype.constraint_observation
+    if _HEADLINE_RESULT_RE.search(statement) and _TOP_LINE_BASELINE_RE.search(statement):
+        return ResultSubtype.headline_result
+    return ResultSubtype.mechanism_validation
+
+
+def _normalize_statement_conservative(statement: str) -> str:
+    normalized = _clean_text(statement)
+    normalized = _NORMALIZE_STATEMENT_PREFIX_RE.sub("", normalized)
+    normalized = _NORMALIZE_RHETORIC_RE.sub("", normalized)
+    normalized = _clean_text(normalized.strip(" ,.;:"))
+
+    replacements = {
+        "kv cache": "KV cache",
+        "llm": "LLM",
+        "gpu": "GPU",
+        "cpu": "CPU",
+    }
+    lowered = normalized.lower()
+    for source, target in replacements.items():
+        lowered = re.sub(rf"\b{re.escape(source)}\b", target, lowered)
+    normalized = _clean_text(lowered)
+    if not normalized:
+        normalized = _clean_text(statement)
+    if normalized and normalized[-1] not in ".!?":
+        normalized = f"{normalized}."
+    return normalized
+
+
+def _claim_rank_score(claim: RawClaim) -> float:
+    evidence_score = len(_evidence_ids(claim))
+    entity_score = len({entity.strip().lower() for entity in claim.entity_names if entity.strip()})
+    token_score = len(_claim_tokens(claim.statement))
+    strength = claim.claim_strength or 0.0
+    return strength + evidence_score * 2.0 + entity_score * 1.5 + min(token_score, 16) / 8.0
+
+
+def _is_restatement_pair(parent: RawClaim, child: RawClaim) -> bool:
+    if parent.claim_type != ClaimType.method or child.claim_type != ClaimType.method:
+        return False
+    token_overlap = _token_overlap_score(parent.statement, child.statement)
+    if token_overlap >= 0.72:
+        return True
+    parent_text = _clean_text(parent.statement).lower()
+    child_text = _clean_text(child.statement).lower()
+    if parent_text in child_text or child_text in parent_text:
+        return True
+    return False
+
+
+def _abstraction_level_for_claim(claim: RawClaim) -> AbstractionLevel:
+    if claim.claim_type == ClaimType.context:
+        return AbstractionLevel.problem
+    if claim.claim_type == ClaimType.method:
+        level = _method_abstraction_level(claim)
+        if level == "primitive":
+            return AbstractionLevel.primitive
+        if level == "system_realization":
+            return AbstractionLevel.system_realization
+        return AbstractionLevel.submechanism
+    return AbstractionLevel.not_applicable
+
+
+def _semantic_role_for_claim(
+    claim: RawClaim,
+    abstraction_level: AbstractionLevel,
+    result_subtype: ResultSubtype | None,
+) -> SemanticRole:
+    if claim.claim_type == ClaimType.context:
+        return SemanticRole.problem
+    if claim.claim_type == ClaimType.method:
+        if abstraction_level in {AbstractionLevel.primitive, AbstractionLevel.system_realization}:
+            return SemanticRole.method_core
+        return SemanticRole.method_support
+    if claim.claim_type == ClaimType.result:
+        if result_subtype == ResultSubtype.headline_result:
+            return SemanticRole.headline_result
+        return SemanticRole.scoped_result
+    if claim.claim_type == ClaimType.assumption:
+        return SemanticRole.assumption
+    return SemanticRole.limitation
+
+
+def _canonical_label_parts(claim: RawClaim, normalized_statement: str) -> list[str]:
+    tokens = [
+        token
+        for token in _TOKEN_SPLIT_RE.split(normalized_statement.lower())
+        if token
+        and len(token) > 2
+        and token not in _STOPWORDS
+        and token not in _CANONICAL_LABEL_BLOCKLIST
+        and not token.isdigit()
+    ]
+
+    entity_tokens: list[str] = []
+    for entity in claim.entity_names:
+        for token in _TOKEN_SPLIT_RE.split(entity.lower()):
+            if (
+                token
+                and len(token) > 2
+                and token not in _STOPWORDS
+                and token not in _CANONICAL_LABEL_BLOCKLIST
+                and not token.isdigit()
+            ):
+                entity_tokens.append(token)
+
+    weighted = [token for token in tokens if token in _CANONICAL_LABEL_VERB_WEIGHTS]
+    parts: list[str] = []
+    for token in [*weighted, *entity_tokens, *tokens]:
+        if token in parts:
+            continue
+        parts.append(token)
+        if len(parts) >= 6:
+            break
+    if not parts:
+        parts = [claim.claim_type.value, "claim"]
+    return parts
 
 
 def _best_method_parent(
@@ -1304,12 +1497,34 @@ def _one_liner_or_unspecified(one_liner: OneLiner) -> OneLiner:
     )
 
 
+def _compaction_support_detail(
+    demoted_claim: RawClaim,
+    *,
+    anchor_claim_id: str,
+    index: int,
+) -> SupportDetail:
+    strength = demoted_claim.claim_strength or 0.0
+    confidence = max(0.0, min(1.0, round(0.45 + (strength / 10.0), 3)))
+    return SupportDetail(
+        support_detail_id=f"SD_compact_{demoted_claim.claim_id}_{index}",
+        detail_type=SupportDetailType.implementation_fact,
+        text=demoted_claim.statement,
+        source_section=demoted_claim.source_section,
+        anchor_claim_id=anchor_claim_id,
+        candidate_anchor_ids=[anchor_claim_id],
+        relationship_type=SupportRelationshipType.implements,
+        confidence=confidence,
+        evidence_ids=[pointer.artifact_id for pointer in demoted_claim.evidence if pointer.artifact_id.strip()],
+        promotable=True,
+    )
+
+
 def _build_tree_nodes(
     claims: list[RawClaim],
     faceted: list[FacetedClaim],
     assignments: list[TreeNodeAssignment],
     parent_hints: dict[str, str] | None = None,
-) -> list[ClaimNode]:
+) -> tuple[list[ClaimNode], list[SupportDetail], dict[str, float | int]]:
     claim_by_id: dict[str, RawClaim] = {}
     claim_order: list[str] = []
     for claim in claims:
@@ -1321,6 +1536,8 @@ def _build_tree_nodes(
     facets_by_id = {faceted_claim.claim.claim_id: faceted_claim for faceted_claim in faceted}
     all_method_claims = [claim_by_id[claim_id] for claim_id in claim_order if claim_by_id[claim_id].claim_type == ClaimType.method]
     core_method_claims = [claim for claim in all_method_claims if not _is_low_level_method(claim)] or list(all_method_claims)
+    generated_support_details: list[SupportDetail] = []
+    initial_node_count = len(claim_order)
 
     suppressed_method_ids: set[str] = set()
     for method_claim in all_method_claims:
@@ -1740,6 +1957,100 @@ def _build_tree_nodes(
         parent_by_claim[claim_id] = best_method_id
         child_count[best_method_id] = child_count.get(best_method_id, 0) + 1
 
+    # Subtree-local restatement compaction for method parent-child pairs.
+    compaction_index = 1
+    changed = True
+    while changed:
+        changed = False
+        children_by_parent: dict[str, list[str]] = {}
+        for child_id, parent_id in parent_by_claim.items():
+            children_by_parent.setdefault(parent_id, []).append(child_id)
+
+        for parent_id in list(claim_order):
+            parent_claim = claim_by_id.get(parent_id)
+            if parent_claim is None or parent_claim.claim_type != ClaimType.method:
+                continue
+            for child_id in list(children_by_parent.get(parent_id, [])):
+                child_claim = claim_by_id.get(child_id)
+                if child_claim is None or child_claim.claim_type != ClaimType.method:
+                    continue
+                if not _is_restatement_pair(parent_claim, child_claim):
+                    continue
+
+                parent_score = _claim_rank_score(parent_claim)
+                child_score = _claim_rank_score(child_claim)
+                if child_score > parent_score + 0.15:
+                    survivor_id = child_id
+                    demoted_id = parent_id
+                else:
+                    survivor_id = parent_id
+                    demoted_id = child_id
+
+                demoted_claim = claim_by_id.get(demoted_id)
+                if demoted_claim is None:
+                    continue
+
+                generated_support_details.append(
+                    _compaction_support_detail(
+                        demoted_claim,
+                        anchor_claim_id=survivor_id,
+                        index=compaction_index,
+                    )
+                )
+                compaction_index += 1
+                folded_support_evidence.setdefault(survivor_id, []).extend(demoted_claim.evidence)
+
+                if demoted_id == child_id:
+                    # Keep parent and lift child descendants.
+                    for node_id, node_parent in list(parent_by_claim.items()):
+                        if node_parent != child_id:
+                            continue
+                        if _would_create_parent_cycle(node_id, survivor_id, parent_by_claim):
+                            continue
+                        parent_by_claim[node_id] = survivor_id
+                        deps = depends_by_claim.get(node_id, [])
+                        if deps == [child_id]:
+                            depends_by_claim[node_id] = [survivor_id]
+                else:
+                    # Keep child and collapse parent summary into support detail.
+                    grandparent_id = parent_by_claim.get(parent_id)
+                    if grandparent_id and not _would_create_parent_cycle(survivor_id, grandparent_id, parent_by_claim):
+                        parent_by_claim[survivor_id] = grandparent_id
+                    else:
+                        parent_by_claim.pop(survivor_id, None)
+                    for node_id, node_parent in list(parent_by_claim.items()):
+                        if node_parent != parent_id or node_id == survivor_id:
+                            continue
+                        if _would_create_parent_cycle(node_id, survivor_id, parent_by_claim):
+                            continue
+                        parent_by_claim[node_id] = survivor_id
+                        deps = depends_by_claim.get(node_id, [])
+                        if deps == [parent_id]:
+                            depends_by_claim[node_id] = [survivor_id]
+
+                parent_by_claim.pop(demoted_id, None)
+                depends_by_claim.pop(demoted_id, None)
+                for node_id, deps in list(depends_by_claim.items()):
+                    if demoted_id not in deps:
+                        continue
+                    repaired: list[str] = []
+                    for dep in deps:
+                        if dep == demoted_id:
+                            if survivor_id != node_id and survivor_id not in repaired:
+                                repaired.append(survivor_id)
+                            continue
+                        if dep != node_id and dep not in repaired:
+                            repaired.append(dep)
+                    depends_by_claim[node_id] = repaired
+
+                if demoted_id in claim_order:
+                    claim_order.remove(demoted_id)
+                claim_by_id.pop(demoted_id, None)
+                changed = True
+                break
+            if changed:
+                break
+
     # Sanitize depends_on edges that contradict the structural tree.
     for claim_id in claim_order:
         dependencies = depends_by_claim.get(claim_id, [])
@@ -1774,10 +2085,45 @@ def _build_tree_nodes(
         if not depends_by_claim[claim_id]:
             depends_by_claim[claim_id] = [parent_id]
 
+    abstraction_by_claim: dict[str, AbstractionLevel] = {}
+    role_by_claim: dict[str, SemanticRole] = {}
+    subtype_by_claim: dict[str, ResultSubtype | None] = {}
+    normalized_by_claim: dict[str, str] = {}
+    label_by_claim: dict[str, str] = {}
+    used_labels: set[str] = set()
+
+    for claim_id in claim_order:
+        claim = claim_by_id[claim_id]
+        abstraction = _abstraction_level_for_claim(claim)
+        subtype = _classify_result_subtype(claim)
+        role = _semantic_role_for_claim(claim, abstraction, subtype)
+        normalized_statement = _normalize_statement_conservative(claim.statement)
+
+        base_label = "_".join(_canonical_label_parts(claim, normalized_statement))
+        if not base_label:
+            base_label = f"{claim.claim_type.value}_claim"
+        label = base_label
+        suffix = 2
+        while label in used_labels:
+            label = f"{base_label}_{suffix}"
+            suffix += 1
+        used_labels.add(label)
+
+        abstraction_by_claim[claim_id] = abstraction
+        subtype_by_claim[claim_id] = subtype
+        role_by_claim[claim_id] = role
+        normalized_by_claim[claim_id] = normalized_statement
+        label_by_claim[claim_id] = label
+
     nodes = {
         claim_id: ClaimNode(
             claim_id=claim.claim_id,
             claim_type=claim.claim_type,
+            abstraction_level=abstraction_by_claim[claim_id],
+            semantic_role=role_by_claim[claim_id],
+            canonical_label=label_by_claim[claim_id],
+            normalized_statement=normalized_by_claim[claim_id],
+            result_subtype=subtype_by_claim[claim_id],
             statement=claim.statement,
             evidence=_merge_evidence_pointers(
                 list(claim.evidence),
@@ -1802,7 +2148,13 @@ def _build_tree_nodes(
             continue
         parent_node.children.append(child_node)
 
-    return [nodes[claim_id] for claim_id in claim_order if claim_id not in parent_by_claim]
+    roots = [nodes[claim_id] for claim_id in claim_order if claim_id not in parent_by_claim]
+    metrics: dict[str, float | int] = {
+        "initial_node_count": initial_node_count,
+        "final_node_count": len(claim_order),
+        "compaction_demotions": len(generated_support_details),
+    }
+    return roots, generated_support_details, metrics
 
 
 def _read_tree_float(config: Any, key: str, default: float) -> float:
@@ -2054,14 +2406,20 @@ async def assemble_tree_deterministic(
         assignment_by_id.update(resolved)
 
     final_assignments = [assignment_by_id[claim.claim_id] for claim in combined_claims if claim.claim_id in assignment_by_id]
-    claim_tree = _build_tree_nodes(combined_claims, faceted, final_assignments, parent_hints=parent_hints)
+    claim_tree, compacted_support_details, _ = _build_tree_nodes(
+        combined_claims,
+        faceted,
+        final_assignments,
+        parent_hints=parent_hints,
+    )
+    merged_support_details = [*list(support_details or []), *compacted_support_details]
 
     return PaperDecomposition(
         metadata=metadata,
         one_liner=_deterministic_one_liner(combined_claims),
         claim_tree=claim_tree,
         negative_claims=normalized_negatives,
-        support_details=list(support_details or []),
+        support_details=merged_support_details,
         all_artifacts=list(artifacts),
     )
 
@@ -2103,12 +2461,18 @@ async def assemble_tree(
         raise TypeError("Expected TreeAssemblyOutput from structured model call.")
 
     parent_hints = _canonical_parent_hints(combined_claims, claim_groups)
-    claim_tree = _build_tree_nodes(combined_claims, faceted, result.nodes, parent_hints=parent_hints)
+    claim_tree, compacted_support_details, _ = _build_tree_nodes(
+        combined_claims,
+        faceted,
+        result.nodes,
+        parent_hints=parent_hints,
+    )
     return PaperDecomposition(
         metadata=metadata,
         one_liner=_one_liner_or_unspecified(result.one_liner),
         claim_tree=claim_tree,
         negative_claims=normalized_negatives,
+        support_details=compacted_support_details,
         all_artifacts=list(artifacts),
     )
 

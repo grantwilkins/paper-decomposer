@@ -67,12 +67,22 @@ def test_claim_node_parses_recursive_children() -> None:
         {
             "claim_id": "m1",
             "claim_type": "method",
+            "abstraction_level": "system_realization",
+            "semantic_role": "method_core",
+            "canonical_label": "root_claim",
+            "normalized_statement": "Root claim.",
+            "result_subtype": None,
             "statement": "Root claim.",
             "depends_on": [],
             "children": [
                 {
                     "claim_id": "r1",
                     "claim_type": "result",
+                    "abstraction_level": "not_applicable",
+                    "semantic_role": "scoped_result",
+                    "canonical_label": "child_claim",
+                    "normalized_statement": "Child claim.",
+                    "result_subtype": "mechanism_validation",
                     "statement": "Child claim.",
                     "depends_on": ["m1"],
                     "children": [],

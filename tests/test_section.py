@@ -619,6 +619,74 @@ def test_extract_section_claims_suppresses_stack_inventory_statements(
     assert "m_stack" not in ids
 
 
+def test_extract_section_claims_drops_nonconditional_assumption_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    section = Section(
+        section_number="6",
+        title="Discussion",
+        role=RhetoricalRole.discussion,
+        body_text="Discussion.",
+        char_count=11,
+    )
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type | None = None,
+        config: dict | None = None,
+    ) -> FlatSectionOutput:
+        assert tier == "small"
+        assert response_schema is FlatSectionOutput
+        return FlatSectionOutput(
+            claims=[
+                FlatClaim(
+                    claim_id="a_non_conditional",
+                    claim_type=ClaimType.assumption.value,
+                    statement="Future work could improve generalization to more domains.",
+                )
+            ]
+        )
+
+    monkeypatch.setattr(section_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(extract_section_claims(section, [], [], {"pipeline": {"section_extraction": {}}}))
+    assert output.claims == []
+
+
+def test_extract_section_claims_drops_negative_without_explicit_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    section = Section(
+        section_number="6",
+        title="Discussion",
+        role=RhetoricalRole.discussion,
+        body_text="Discussion.",
+        char_count=11,
+    )
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type | None = None,
+        config: dict | None = None,
+    ) -> FlatSectionOutput:
+        assert tier == "small"
+        assert response_schema is FlatSectionOutput
+        return FlatSectionOutput(
+            claims=[
+                FlatClaim(
+                    claim_id="n_weak",
+                    claim_type=ClaimType.negative.value,
+                    statement="There are limitations.",
+                )
+            ]
+        )
+
+    monkeypatch.setattr(section_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(extract_section_claims(section, [], [], {"pipeline": {"section_extraction": {}}}))
+    assert output.claims == []
+
+
 @pytest.mark.api
 @requires_api_key
 def test_extract_section_claims_for_method_and_evaluation() -> None:

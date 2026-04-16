@@ -16,14 +16,21 @@ Plausible wrong implementations:
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Iterable
 from typing import Any
 
 import pytest
 
 import paper_decomposer.prompts.tree as tree_prompts
-from paper_decomposer.prompts.tree import TREE_SYSTEM_PROMPT, assemble_tree, build_tree_prompt
+from paper_decomposer.prompts.tree import (
+    TREE_SYSTEM_PROMPT,
+    assemble_tree,
+    assemble_tree_deterministic,
+    build_tree_prompt,
+)
 from paper_decomposer.schema import (
+    AbstractionLevel,
     ClaimLocalRole,
     ClaimStructuralHints,
     ClaimGroup,
@@ -39,6 +46,8 @@ from paper_decomposer.schema import (
     PaperMetadata,
     ParentPreference,
     RawClaim,
+    ResultSubtype,
+    SemanticRole,
     ScopeOfChange,
     SystemsFacets,
     TreeAssemblyOutput,
@@ -1576,3 +1585,205 @@ def test_assemble_tree_reattaches_derivative_context_under_core_context(
 
     parent_by_child = _parent_map(output.claim_tree)
     assert parent_by_child["c_derivative"] == "c_core"
+
+
+def test_assemble_tree_deterministic_assigns_typed_semantic_contract() -> None:
+    metadata = PaperMetadata(title="Typed Contract", authors=["A"])
+    claims = [
+        RawClaim(
+            claim_id="c1",
+            claim_type=ClaimType.context,
+            statement="Existing runtimes waste KV cache memory due to fragmentation bottlenecks.",
+            source_section="1 Introduction",
+        ),
+        RawClaim(
+            claim_id="m1",
+            claim_type=ClaimType.method,
+            statement="We implement a block-table mapping to allocate KV blocks on demand.",
+            source_section="4 Method",
+            entity_names=["block table", "KV cache"],
+        ),
+        RawClaim(
+            claim_id="r1",
+            claim_type=ClaimType.result,
+            statement="vLLM achieves 2x higher throughput than Orca at similar latency.",
+            source_section="5 Evaluation",
+            entity_names=["vLLM", "Orca"],
+        ),
+        RawClaim(
+            claim_id="a1",
+            claim_type=ClaimType.assumption,
+            statement="The gain requires sufficient GPU memory bandwidth under heavy batching.",
+            source_section="6 Discussion",
+        ),
+        RawClaim(
+            claim_id="n1",
+            claim_type=ClaimType.negative,
+            statement="Compaction was rejected because it stalls decoding.",
+            source_section="3 Design Choices",
+            rejected_what="KV compaction",
+            rejected_why="stalls decoding",
+        ),
+    ]
+
+    output = asyncio.run(
+        assemble_tree_deterministic(
+            metadata=metadata,
+            claims=claims,
+            faceted=[],
+            negatives=[claims[-1]],
+            artifacts=[],
+            config={"pipeline": {"tree": {"ambiguity_budget": 0}}},
+            claim_groups=[],
+            support_details=[],
+        )
+    )
+
+    for node in _iter_nodes(output.claim_tree):
+        assert node.canonical_label
+        assert node.normalized_statement
+        assert re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", node.canonical_label)
+        if node.claim_type == ClaimType.result:
+            assert node.result_subtype is not None
+        else:
+            assert node.result_subtype is None
+
+    node_by_id = {node.claim_id: node for node in _iter_nodes(output.claim_tree)}
+    assert node_by_id["c1"].abstraction_level == AbstractionLevel.problem
+    assert node_by_id["c1"].semantic_role == SemanticRole.problem
+    assert node_by_id["m1"].abstraction_level in {
+        AbstractionLevel.primitive,
+        AbstractionLevel.system_realization,
+        AbstractionLevel.submechanism,
+    }
+    assert node_by_id["a1"].semantic_role == SemanticRole.assumption
+    assert node_by_id["n1"].semantic_role == SemanticRole.limitation
+
+
+def test_assemble_tree_result_subtype_workload_precedence_over_constraint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = PaperMetadata(title="Subtype Boundary", authors=["A"])
+    claims = [
+        RawClaim(
+            claim_id="c1",
+            claim_type=ClaimType.context,
+            statement="Workload variation affects serving behavior.",
+            source_section="1 Intro",
+        ),
+        RawClaim(
+            claim_id="m1",
+            claim_type=ClaimType.method,
+            statement="We implement paged KV block management.",
+            source_section="4 Method",
+            entity_names=["paged KV"],
+        ),
+        RawClaim(
+            claim_id="r_workload",
+            claim_type=ClaimType.result,
+            statement=(
+                "On the ShareGPT workload, long prompt-length distribution dominates request mix and "
+                "exposes a memory-bound regime."
+            ),
+            source_section="5 Evaluation",
+            entity_names=["ShareGPT"],
+        ),
+    ]
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type[Any] | None = None,
+        config: Any | None = None,
+    ) -> Any:
+        _ = (tier, messages, response_schema, config)
+        return TreeAssemblyOutput(
+            one_liner=OneLiner(achieved="ok", via="ok", because="ok"),
+            nodes=[
+                TreeNodeAssignment(claim_id="c1", parent_id=None, depends_on=[]),
+                TreeNodeAssignment(claim_id="m1", parent_id="c1", depends_on=["c1"]),
+                TreeNodeAssignment(claim_id="r_workload", parent_id="m1", depends_on=["m1"]),
+            ],
+        )
+
+    monkeypatch.setattr(tree_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(
+        assemble_tree(
+            metadata=metadata,
+            claims=claims,
+            faceted=[],
+            negatives=[],
+            artifacts=[],
+            config={"pipeline": {"tree": {"model_tier": "heavy"}}},
+        )
+    )
+
+    node_by_id = {node.claim_id: node for node in _iter_nodes(output.claim_tree)}
+    assert node_by_id["r_workload"].result_subtype == ResultSubtype.workload_characterization
+    assert node_by_id["r_workload"].semantic_role == SemanticRole.scoped_result
+
+
+def test_assemble_tree_compacts_restatement_pair_into_support_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = PaperMetadata(title="Compaction", authors=["A"])
+    claims = [
+        RawClaim(
+            claim_id="c1",
+            claim_type=ClaimType.context,
+            statement="KV cache fragmentation reduces throughput.",
+            source_section="1 Intro",
+        ),
+        RawClaim(
+            claim_id="m_parent",
+            claim_type=ClaimType.method,
+            statement="vLLM manages KV cache memory with block-table mapping.",
+            source_section="4 Method",
+            entity_names=["vLLM", "KV cache"],
+        ),
+        RawClaim(
+            claim_id="m_child",
+            claim_type=ClaimType.method,
+            statement="vLLM manages KV cache memory with block-table mapping and on-demand allocation.",
+            source_section="4 Method",
+            evidence=[EvidencePointer(artifact_id="fig_1", role="supports")],
+            entity_names=["vLLM", "block table", "KV cache"],
+        ),
+    ]
+    artifacts = [EvidenceArtifact(artifact_type="figure", artifact_id="fig_1", caption="Method.", source_page=3)]
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type[Any] | None = None,
+        config: Any | None = None,
+    ) -> Any:
+        _ = (tier, messages, response_schema, config)
+        return TreeAssemblyOutput(
+            one_liner=OneLiner(achieved="ok", via="ok", because="ok"),
+            nodes=[
+                TreeNodeAssignment(claim_id="c1", parent_id=None, depends_on=[]),
+                TreeNodeAssignment(claim_id="m_parent", parent_id="c1", depends_on=["c1"]),
+                TreeNodeAssignment(claim_id="m_child", parent_id="m_parent", depends_on=["m_parent"]),
+            ],
+        )
+
+    monkeypatch.setattr(tree_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(
+        assemble_tree(
+            metadata=metadata,
+            claims=claims,
+            faceted=[],
+            negatives=[],
+            artifacts=artifacts,
+            config={"pipeline": {"tree": {"model_tier": "heavy"}}},
+        )
+    )
+
+    node_by_id = {node.claim_id: node for node in _iter_nodes(output.claim_tree)}
+    assert "m_child" in node_by_id
+    assert "m_parent" not in node_by_id
+    assert any(
+        detail.anchor_claim_id == "m_child" and "manages KV cache memory" in detail.text
+        for detail in output.support_details
+    )

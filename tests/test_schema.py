@@ -3,8 +3,10 @@ from collections.abc import Iterable
 
 import pytest
 from pydantic import BaseModel
+from pydantic import ValidationError
 
 from paper_decomposer.schema import (
+    AbstractionLevel,
     AlgorithmFacets,
     ArchitectureFacets,
     ClaimGroup,
@@ -25,8 +27,10 @@ from paper_decomposer.schema import (
     PaperMetadata,
     PipelineFacets,
     RawClaim,
+    ResultSubtype,
     RepresentationFacets,
     RhetoricalRole,
+    SemanticRole,
     ScopeOfChange,
     Section,
     SectionExtractionOutput,
@@ -157,6 +161,11 @@ def _model_examples() -> list[tuple[type[BaseModel], BaseModel]]:
     child_node = ClaimNode(
         claim_id="r1",
         claim_type=ClaimType.result,
+        abstraction_level=AbstractionLevel.not_applicable,
+        semantic_role=SemanticRole.scoped_result,
+        canonical_label="throughput_improvement_over_baseline",
+        normalized_statement="Improves throughput by 2x over baseline.",
+        result_subtype=ResultSubtype.headline_result,
         statement="The method improves throughput by 2x.",
         evidence=[pointer],
         facets=None,
@@ -166,6 +175,11 @@ def _model_examples() -> list[tuple[type[BaseModel], BaseModel]]:
     root_node = ClaimNode(
         claim_id="m1",
         claim_type=ClaimType.method,
+        abstraction_level=AbstractionLevel.system_realization,
+        semantic_role=SemanticRole.method_core,
+        canonical_label="logical_to_physical_kv_block_mapping",
+        normalized_statement="Maps logical KV blocks to physical memory blocks.",
+        result_subtype=None,
         statement=claim.statement,
         evidence=[pointer],
         facets=faceted_claim,
@@ -254,3 +268,75 @@ def test_structured_output_models_json_schema(model_cls: type[BaseModel]) -> Non
     assert isinstance(serialized, dict)
     assert serialized.get("type") == "object"
     assert "properties" in serialized
+
+
+def test_claim_node_enforces_result_subtype_contract() -> None:
+    with pytest.raises(ValidationError):
+        ClaimNode(
+            claim_id="r1",
+            claim_type=ClaimType.result,
+            abstraction_level=AbstractionLevel.not_applicable,
+            semantic_role=SemanticRole.scoped_result,
+            canonical_label="throughput_gain",
+            normalized_statement="Improves throughput.",
+            result_subtype=None,
+            statement="Improves throughput.",
+            evidence=[],
+            children=[],
+            depends_on=[],
+        )
+
+    with pytest.raises(ValidationError):
+        ClaimNode(
+            claim_id="m1",
+            claim_type=ClaimType.method,
+            abstraction_level=AbstractionLevel.system_realization,
+            semantic_role=SemanticRole.method_core,
+            canonical_label="block_mapping",
+            normalized_statement="Maps blocks.",
+            result_subtype=ResultSubtype.mechanism_validation,
+            statement="Maps blocks.",
+            evidence=[],
+            children=[],
+            depends_on=[],
+        )
+
+
+def test_paper_decomposition_requires_unique_canonical_labels() -> None:
+    node_a = ClaimNode(
+        claim_id="c1",
+        claim_type=ClaimType.context,
+        abstraction_level=AbstractionLevel.problem,
+        semantic_role=SemanticRole.problem,
+        canonical_label="memory_bottleneck",
+        normalized_statement="Memory is a bottleneck.",
+        result_subtype=None,
+        statement="Memory is a bottleneck.",
+        evidence=[],
+        children=[],
+        depends_on=[],
+    )
+    node_b = ClaimNode(
+        claim_id="c2",
+        claim_type=ClaimType.context,
+        abstraction_level=AbstractionLevel.problem,
+        semantic_role=SemanticRole.problem,
+        canonical_label="memory_bottleneck",
+        normalized_statement="Memory bottleneck remains.",
+        result_subtype=None,
+        statement="Memory bottleneck remains.",
+        evidence=[],
+        children=[],
+        depends_on=[],
+    )
+
+    with pytest.raises(ValidationError):
+        PaperDecomposition(
+            metadata=PaperMetadata(title="X", authors=[]),
+            one_liner=OneLiner(achieved="x", via="y", because="z"),
+            claim_tree=[node_a, node_b],
+            negative_claims=[],
+            support_details=[],
+            all_artifacts=[],
+            extraction_cost_usd=0.0,
+        )
