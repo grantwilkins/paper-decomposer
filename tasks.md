@@ -1,6 +1,6 @@
 # Tasks
 
-- Validate section-level claim-worthiness thresholds on a representative paper set and tune false-positive/false-negative balance.
-- Add configuration knobs for worthiness thresholds and suppression toggles in `config.yaml` to allow dataset-specific calibration.
-- Add pipeline-level metrics logging for claim suppression reasons to support iterative prompt/filter refinement.
-- Evaluate whether `ResultSubtype` should add a dedicated `scoped_result` subtype after collecting subtype-confusion metrics on a representative paper set.
+- Calibrate Stage 2 concept-family and abstraction-tier heuristics on a representative paper set and record false merges versus missed merges.
+- Add a deterministic alias table for canonical-label normalization where repeated family drift still appears across papers.
+- Expand scorecard reporting from console output into a persisted evaluation artifact so ontology-stability regressions can be tracked over time.
+- Revisit the live API facet-classification integration tests; they currently depend on model behavior that is not stable enough to serve as a hard semantic contract.

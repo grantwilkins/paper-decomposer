@@ -1,60 +1,14 @@
 from __future__ import annotations
 
-import asyncio
-import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
+import re
 from typing import Any, cast
 
-from ..models import call_model
-from ..schema import (
-    ClaimGroup,
-    CrossTypeOutput,
-    DedupBatchOutput,
-    DedupOutput,
-    ModelTier,
-    ParentChildLink,
-    RawClaim,
-)
-
-WITHIN_TYPE_DEDUP_PROMPT = """You are given {n} {claim_type} claims
-from the same paper. Some may be restatements of the same finding.
-
-Canonicalization rules:
-- Group claims that assert the SAME proposition, including close paraphrases
-  and seed/abstract placeholders repeated later in sections.
-- Ignore claim_id naming style when deciding semantic overlap.
-- For each duplicate group, choose exactly one canonical_id.
-- Prefer canonicals with concrete provenance:
-  section-specific source (not seed/abstract placeholders),
-  richer evidence pointers, and more concrete detail.
-- If one claim is a broad summary and another is a true sub-claim
-  (not a duplicate), keep separate groups and set child.parent_id
-  to the broader canonical.
-- Repeated method summaries should collapse to one main canonical
-  plus child mechanism groups when appropriate.
-
-If a claim has no duplicates, it forms a group of size 1.
-Return JSON only.
-"""
-
-CROSS_TYPE_PROMPT = """You are given the deduplicated claims from
-a research paper, organized by type. Identify PARENT-CHILD
-relationships across types.
-
-Rules:
-- A general RESULT is parent of specific per-experiment RESULTS.
-- A top-level METHOD is parent of its sub-mechanisms.
-- Do NOT link CONTEXT -> METHOD here.
-
-Return JSON only.
-"""
-
-DEDUP_PROMPT = WITHIN_TYPE_DEDUP_PROMPT
+from ..schema import ClaimGroup, ClaimType, DedupOutput, ModelTier, RawClaim
 
 _VALID_TIERS: set[ModelTier] = {"small", "medium", "heavy"}
-_MAX_WITHIN_TYPE_BATCH = 20
 _TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 _STOPWORDS = {
     "a",
@@ -79,10 +33,57 @@ _STOPWORDS = {
     "we",
     "with",
 }
-_PLACEHOLDER_SOURCE_HINTS = {"abstract", "seed", "summary", "overview"}
-_UNCERTAIN_SIMILARITY_MIN = 0.42
-_UNCERTAIN_SIMILARITY_MAX = 0.83
-_SEMANTIC_NODE_CAP_DEFAULT = 15
+_METHOD_VERB_RE = re.compile(r"\b(introduc|propos|present|design|build|develop|use|uses|enable|enables)\b", re.IGNORECASE)
+_MECHANISM_ASSUMPTION_RE = re.compile(
+    r"\b(allocat(?:e|es|ed|ing)|share(?:s|d|ing)?|broadcast(?:s|ed|ing)?|free(?:s|d|ing)?|"
+    r"cop(?:y|ies|ied|ying)|schedul(?:e|es|ed|ing)|map(?:s|ped|ping)?|implement(?:s|ed|ing)?)\b",
+    re.IGNORECASE,
+)
+_PRIMITIVE_HINT_RE = re.compile(
+    r"\b(pagedattention|attention algorithm|algorithm|paging|blockwise computation|non-contiguous memory)\b",
+    re.IGNORECASE,
+)
+_SYSTEM_HINT_RE = re.compile(
+    r"\b(vllm|serving system|runtime|server|framework|distributed execution|system overview)\b",
+    re.IGNORECASE,
+)
+_SUBMECHANISM_HINT_RE = re.compile(
+    r"\b(kernel|scheduler|allocator|cache manager|block table|eviction|preemption|copy-on-write|warp|cuda)\b",
+    re.IGNORECASE,
+)
+_HEADLINE_RESULT_RE = re.compile(
+    r"\b(throughput|request rate|request rates|outperform|higher throughput|same latency|speedup|latency)\b",
+    re.IGNORECASE,
+)
+_MEMORY_RESULT_RE = re.compile(
+    r"\b(memory|kv cache|fragmentation|batch size|memory waste|memory saving|cache utilization)\b",
+    re.IGNORECASE,
+)
+_DECODING_RESULT_RE = re.compile(r"\b(beam|sampling|prefix|decoding|prompt sharing)\b", re.IGNORECASE)
+_CONSTRAINT_RESULT_RE = re.compile(r"\b(overhead|penalty|constraint|cost|latency increase|oom|out of memory)\b", re.IGNORECASE)
+_LABEL_BLOCKLIST = {
+    "paper",
+    "system",
+    "method",
+    "approach",
+    "result",
+    "results",
+    "baseline",
+    "baselines",
+    "dataset",
+    "sharegpt",
+    "alpaca",
+}
+_ALLOWED_PRIMITIVE_SYSTEM_NAMES = {"pagedattention"}
+DEDUP_PROMPT = "Group close paraphrases and keep one canonical claim per deterministic concept family."
+
+
+@dataclass(frozen=True)
+class CompressionResult:
+    promoted_claims: list[RawClaim]
+    residual_claims: list[RawClaim]
+    claim_groups: list[ClaimGroup]
+    diagnostics: dict[str, Any]
 
 
 def _resolve_model_tier(config: Any) -> ModelTier:
@@ -109,67 +110,36 @@ def _resolve_model_tier(config: Any) -> ModelTier:
     return "medium"
 
 
-def _get_semantic_node_cap(config: Any) -> int:
-    value: Any = None
-
+def _dedup_cfg(config: Any) -> Mapping[str, Any]:
     pipeline = getattr(config, "pipeline", None)
     if pipeline is not None:
         dedup_cfg = getattr(pipeline, "dedup", None)
         if isinstance(dedup_cfg, Mapping):
-            value = dedup_cfg.get("semantic_node_cap")
+            return dedup_cfg
 
-    if value is None and isinstance(config, Mapping):
+    if isinstance(config, Mapping):
         pipeline_cfg = config.get("pipeline")
         if isinstance(pipeline_cfg, Mapping):
             dedup_cfg = pipeline_cfg.get("dedup")
             if isinstance(dedup_cfg, Mapping):
-                value = dedup_cfg.get("semantic_node_cap")
+                return dedup_cfg
+    return {}
 
+
+def _cap(config: Any, key: str, default: int) -> int:
+    raw = _dedup_cfg(config).get(key, default)
     try:
-        return max(1, int(value))
+        return max(0, int(raw))
     except (TypeError, ValueError):
-        return _SEMANTIC_NODE_CAP_DEFAULT
+        return default
 
 
-def _format_claim_line(idx: int, claim: RawClaim) -> str:
-    statement = claim.statement.strip().replace("\n", " ")
-    hint_parts: list[str] = []
-    hints = claim.structural_hints
-    if hints is not None:
-        if hints.elaborates_seed_id:
-            hint_parts.append(f"seed={hints.elaborates_seed_id}")
-        if hints.local_role is not None:
-            hint_parts.append(f"role={hints.local_role.value}")
-        if hints.preferred_parent_type is not None:
-            hint_parts.append(f"pref_parent={hints.preferred_parent_type.value}")
-    hint_suffix = f" [hints: {', '.join(hint_parts)}]" if hint_parts else ""
-    return f'{idx}. [{claim.claim_id}] {claim.claim_type.value.upper()}: "{statement}"{hint_suffix}'
+def _clean_text(text: str) -> str:
+    return " ".join(text.strip().split())
 
 
-def _singleton_groups(claims: list[RawClaim]) -> list[ClaimGroup]:
-    return [ClaimGroup(canonical_id=claim.claim_id, member_ids=[claim.claim_id], parent_id=None) for claim in claims]
-
-
-def _chunk_claims(claims: list[RawClaim], size: int) -> list[list[RawClaim]]:
-    if size <= 0:
-        return [claims]
-    return [claims[idx : idx + size] for idx in range(0, len(claims), size)]
-
-
-def _dedupe_ids(ids: list[str]) -> list[str]:
-    seen: set[str] = set()
-    unique: list[str] = []
-    for value in ids:
-        normalized = value.strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        unique.append(normalized)
-    return unique
-
-
-def _claim_tokens(text: str) -> set[str]:
-    lowered = " ".join(text.strip().lower().split())
+def _tokens(text: str) -> set[str]:
+    lowered = _clean_text(text).lower()
     return {
         token
         for token in _TOKEN_SPLIT_RE.split(lowered)
@@ -177,752 +147,381 @@ def _claim_tokens(text: str) -> set[str]:
     }
 
 
-def _source_section_score(source_section: str) -> int:
-    lowered = source_section.strip().lower()
-    if not lowered:
-        return 0
+def _numbers(text: str) -> set[str]:
+    return set(re.findall(r"\d+(?:\.\d+)?", text))
 
-    score = 1
-    if any(marker in lowered for marker in _PLACEHOLDER_SOURCE_HINTS):
-        score -= 6
-    if "introduction" in lowered:
-        score -= 2
+
+def _evidence_ids(claim: RawClaim) -> set[str]:
+    return {pointer.artifact_id.strip().lower() for pointer in claim.evidence if pointer.artifact_id.strip()}
+
+
+def _source_score(source_section: str) -> int:
+    lowered = source_section.strip().lower()
+    score = 0
     if re.search(r"\b\d", lowered):
-        score += 4
-    if any(
-        marker in lowered
-        for marker in (
-            "method",
-            "design",
-            "implementation",
-            "experiment",
-            "evaluation",
-            "ablation",
-            "results",
-            "analysis",
-        )
-    ):
+        score += 3
+    if any(marker in lowered for marker in ("method", "evaluation", "results", "analysis", "discussion")):
         score += 2
+    if lowered == "abstract":
+        score -= 1
     return score
 
 
-def _canonical_score(claim: RawClaim) -> float:
-    evidence_ids = {pointer.artifact_id.strip().lower() for pointer in claim.evidence if pointer.artifact_id.strip()}
-    token_count = len(_claim_tokens(claim.statement))
-    entity_count = len({entity.strip().lower() for entity in claim.entity_names if entity.strip()})
-    hint = claim.structural_hints
-    detail_penalty = 0.0
-    if hint is not None and hint.local_role is not None and hint.local_role.value == "implementation_detail":
-        detail_penalty = 4.0
-    return float(
-        _source_section_score(claim.source_section) * 12
-        + len(evidence_ids) * 7
-        + min(token_count, 40)
-        + min(entity_count, 5) * 2
-        - detail_penalty
-    )
+def _claim_score(claim: RawClaim) -> float:
+    tokens = len(_tokens(claim.statement))
+    evidence = len(_evidence_ids(claim))
+    entities = len({entity.strip().lower() for entity in claim.entity_names if entity.strip()})
+    number_bonus = 1.0 if re.search(r"\d", claim.statement) else 0.0
+    return float(tokens * 0.2 + evidence * 1.1 + min(entities, 4) * 0.4 + _source_score(claim.source_section) + number_bonus)
 
 
-def _statement_numbers(statement: str) -> set[str]:
-    return set(re.findall(r"\d+(?:\.\d+)?", statement))
+def _jaccard(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
 
 
-def _is_near_duplicate(left: RawClaim, right: RawClaim) -> bool:
+def _near_duplicate(left: RawClaim, right: RawClaim) -> bool:
     if left.claim_type != right.claim_type:
         return False
-
-    left_tokens = _claim_tokens(left.statement)
-    right_tokens = _claim_tokens(right.statement)
+    left_tokens = _tokens(left.statement)
+    right_tokens = _tokens(right.statement)
     if not left_tokens or not right_tokens:
         return False
-
-    overlap = left_tokens & right_tokens
-    if not overlap:
-        return False
-
-    union = left_tokens | right_tokens
-    jaccard = len(overlap) / len(union)
-    coverage = len(overlap) / min(len(left_tokens), len(right_tokens))
-
-    left_numbers = _statement_numbers(left.statement)
-    right_numbers = _statement_numbers(right.statement)
+    left_numbers = _numbers(left.statement)
+    right_numbers = _numbers(right.statement)
     if left_numbers and right_numbers and left_numbers.isdisjoint(right_numbers):
         return False
-
-    left_text = " ".join(left.statement.lower().split())
-    right_text = " ".join(right.statement.lower().split())
-    containment = left_text in right_text or right_text in left_text
-
-    if jaccard >= 0.84:
-        return True
-    if coverage >= 0.9:
-        return True
-    return containment and coverage >= 0.75
+    overlap = _jaccard(left_tokens, right_tokens)
+    containment = len(left_tokens & right_tokens) / max(1, min(len(left_tokens), len(right_tokens)))
+    return overlap >= 0.72 or containment >= 0.82
 
 
-def _pair_similarity(left: RawClaim, right: RawClaim) -> float:
-    if left.claim_type != right.claim_type:
-        return 0.0
-
-    left_tokens = _claim_tokens(left.statement)
-    right_tokens = _claim_tokens(right.statement)
-    if not left_tokens or not right_tokens:
-        return 0.0
-
-    overlap = left_tokens & right_tokens
-    union = left_tokens | right_tokens
-    if not overlap or not union:
-        return 0.0
-
-    jaccard = len(overlap) / len(union)
-    coverage = len(overlap) / min(len(left_tokens), len(right_tokens))
-    numbers_left = _statement_numbers(left.statement)
-    numbers_right = _statement_numbers(right.statement)
-    number_bonus = 0.0
-    if numbers_left and numbers_right and not numbers_left.isdisjoint(numbers_right):
-        number_bonus = 0.08
-    return min(1.0, 0.65 * jaccard + 0.35 * coverage + number_bonus)
+def _canonical_label_seed(claim: RawClaim) -> str:
+    tokens: list[str] = []
+    for token in _tokens(claim.statement):
+        if token in _LABEL_BLOCKLIST:
+            continue
+        if token == "vllm" and classify_method_abstraction(claim) == "primitive":
+            continue
+        tokens.append(token)
+    if claim.claim_type == ClaimType.method and "pagedattention" in _tokens(claim.statement):
+        tokens = ["pagedattention", *[token for token in tokens if token != "pagedattention"]]
+    return "_".join(tokens[:5]) or f"{claim.claim_type.value}_claim"
 
 
-def _deterministic_canonicalize_promoted(
-    claims: list[RawClaim],
-) -> tuple[list[RawClaim], list[ClaimGroup], set[str]]:
+def classify_method_abstraction(claim: RawClaim) -> str:
+    text = _clean_text(claim.statement).lower()
+    if _SUBMECHANISM_HINT_RE.search(text):
+        return "submechanism"
+    primitive_hits = len(_PRIMITIVE_HINT_RE.findall(text))
+    system_hits = len(_SYSTEM_HINT_RE.findall(text))
+    if primitive_hits and primitive_hits >= system_hits:
+        return "primitive"
+    if system_hits:
+        return "system_realization"
+    if _METHOD_VERB_RE.search(text):
+        return "system_realization"
+    return "submechanism"
+
+
+def classify_result_family(claim: RawClaim) -> str:
+    text = _clean_text(claim.statement).lower()
+    if _CONSTRAINT_RESULT_RE.search(text) or ("kernel" in text and "latency" in text):
+        return "constraint_observation"
+    if _DECODING_RESULT_RE.search(text):
+        return "decoding_mode_improvement"
+    if _MEMORY_RESULT_RE.search(text):
+        return "memory_mechanism_validation"
+    if _HEADLINE_RESULT_RE.search(text):
+        return "headline_comparative_performance"
+    return "headline_comparative_performance"
+
+
+def _concept_family(claim: RawClaim) -> str:
+    text = _clean_text(claim.statement).lower()
+    if claim.claim_type == ClaimType.method:
+        tier = classify_method_abstraction(claim)
+        if "pagedattention" in text and tier == "primitive":
+            return "pagedattention"
+        if "vllm" in text and tier == "system_realization":
+            return "vllm_system"
+        seed = _canonical_label_seed(claim)
+        return seed or f"method_{tier}"
+    if claim.claim_type == ClaimType.result:
+        return classify_result_family(claim)
+    return _canonical_label_seed(claim)
+
+
+def _dedupe_preserving_best(claims: list[RawClaim]) -> tuple[list[RawClaim], list[ClaimGroup]]:
     if not claims:
-        return [], [], set()
+        return [], []
 
-    parent = list(range(len(claims)))
-
-    def find(idx: int) -> int:
-        while parent[idx] != idx:
-            parent[idx] = parent[parent[idx]]
-            idx = parent[idx]
-        return idx
-
-    def union(left_idx: int, right_idx: int) -> None:
-        root_left = find(left_idx)
-        root_right = find(right_idx)
-        if root_left == root_right:
-            return
-        parent[root_right] = root_left
-
-    for left_idx in range(len(claims)):
-        for right_idx in range(left_idx + 1, len(claims)):
-            if _is_near_duplicate(claims[left_idx], claims[right_idx]):
-                union(left_idx, right_idx)
-
-    clusters: dict[int, list[RawClaim]] = defaultdict(list)
-    for idx, claim in enumerate(claims):
-        clusters[find(idx)].append(claim)
-
-    canonical_claims: list[RawClaim] = []
+    used: set[str] = set()
+    kept: list[RawClaim] = []
     groups: list[ClaimGroup] = []
-    for member_claims in clusters.values():
-        canonical = max(member_claims, key=_canonical_score)
-        member_ids = sorted(
-            {
-                claim.claim_id
-                for claim in member_claims
-                if claim.claim_id != canonical.claim_id
-            }
-        )
-        canonical_claims.append(canonical)
-        groups.append(
-            ClaimGroup(
-                canonical_id=canonical.claim_id,
-                member_ids=member_ids,
-                parent_id=None,
-            )
-        )
-
-    canonical_claims = sorted(canonical_claims, key=lambda claim: claims.index(claim))
-
-    uncertain_ids: set[str] = set()
-    for left_idx in range(len(canonical_claims)):
-        for right_idx in range(left_idx + 1, len(canonical_claims)):
-            left = canonical_claims[left_idx]
-            right = canonical_claims[right_idx]
-            if left.claim_type != right.claim_type:
-                continue
-            if _is_near_duplicate(left, right):
-                continue
-            similarity = _pair_similarity(left, right)
-            if _UNCERTAIN_SIMILARITY_MIN <= similarity <= _UNCERTAIN_SIMILARITY_MAX:
-                uncertain_ids.add(left.claim_id)
-                uncertain_ids.add(right.claim_id)
-
-    return canonical_claims, groups, uncertain_ids
-
-
-async def _semantic_disambiguate_uncertain_clusters(
-    original_claims: list[RawClaim],
-    deterministic_groups: list[ClaimGroup],
-    uncertain_ids: set[str],
-    config: Any,
-) -> tuple[list[RawClaim], list[ClaimGroup]]:
-    if not uncertain_ids:
-        normalized = _normalize_groups(deterministic_groups)
-        return apply_dedup(original_claims, DedupOutput(groups=normalized)), normalized
-
-    semantic_cap_raw = _get_semantic_node_cap(config)
-    if len(uncertain_ids) > semantic_cap_raw:
-        normalized = _normalize_groups(deterministic_groups)
-        return apply_dedup(original_claims, DedupOutput(groups=normalized)), normalized
-
-    by_type: dict[str, list[RawClaim]] = defaultdict(list)
-    original_by_id = {claim.claim_id: claim for claim in original_claims}
-    for claim_id in sorted(uncertain_ids):
-        claim = original_by_id.get(claim_id)
-        if claim is None:
-            continue
-        by_type[claim.claim_type.value].append(claim)
-
-    semantic_groups: list[ClaimGroup] = []
-    for claim_type, claims in by_type.items():
-        if len(claims) <= 1:
-            continue
-        try:
-            batch_result = await dedup_type_batch(claims, claim_type, config)
-            semantic_groups.extend(batch_result.groups)
-        except Exception:
-            continue
-
-    if not semantic_groups:
-        normalized = _normalize_groups(deterministic_groups)
-        return apply_dedup(original_claims, DedupOutput(groups=normalized)), normalized
-
-    merged = _canonicalize_groups([*deterministic_groups, *semantic_groups], original_by_id)
-    normalized = _normalize_groups(merged)
-    return apply_dedup(original_claims, DedupOutput(groups=normalized)), normalized
-
-
-def _collapse_residual_duplicates(claims: list[RawClaim]) -> tuple[list[RawClaim], list[ClaimGroup]]:
-    if len(claims) <= 1:
-        return claims, []
-
-    parent = list(range(len(claims)))
-
-    def find(idx: int) -> int:
-        while parent[idx] != idx:
-            parent[idx] = parent[parent[idx]]
-            idx = parent[idx]
-        return idx
-
-    def union(left_idx: int, right_idx: int) -> None:
-        root_left = find(left_idx)
-        root_right = find(right_idx)
-        if root_left == root_right:
-            return
-        parent[root_right] = root_left
-
-    for left_idx in range(len(claims)):
-        for right_idx in range(left_idx + 1, len(claims)):
-            if _is_near_duplicate(claims[left_idx], claims[right_idx]):
-                union(left_idx, right_idx)
-
-    clusters: dict[int, list[RawClaim]] = defaultdict(list)
-    for idx, claim in enumerate(claims):
-        clusters[find(idx)].append(claim)
-
-    collapsed_claims: list[RawClaim] = []
-    groups: list[ClaimGroup] = []
-    for member_claims in clusters.values():
-        if len(member_claims) == 1:
-            collapsed_claims.append(member_claims[0])
-            continue
-
-        canonical = max(member_claims, key=_canonical_score)
-        member_ids = sorted(
-            {
-                claim.claim_id
-                for claim in member_claims
-                if claim.claim_id != canonical.claim_id
-            }
-        )
-        collapsed_claims.append(canonical)
-        groups.append(
-            ClaimGroup(
-                canonical_id=canonical.claim_id,
-                member_ids=member_ids,
-                parent_id=None,
-            )
-        )
-
-    ordered_collapsed = sorted(
-        collapsed_claims,
-        key=lambda claim: claims.index(claim),
-    )
-    return ordered_collapsed, groups
-
-
-def _canonicalize_groups(
-    groups: list[ClaimGroup],
-    claim_by_id: dict[str, RawClaim],
-) -> list[ClaimGroup]:
-    if not groups:
-        return []
-
-    preliminary: list[ClaimGroup] = []
-    member_to_canonical: dict[str, str] = {}
-
-    for group in groups:
-        original_canonical = group.canonical_id.strip()
-        if original_canonical not in claim_by_id:
-            raise ValueError(
-                f"Canonical claim_id '{group.canonical_id}' not found in original claims."
-            )
-
-        member_ids = _dedupe_ids([group.canonical_id, *group.member_ids])
-        available_ids = [member_id for member_id in member_ids if member_id in claim_by_id]
-        if not available_ids:
-            raise ValueError(
-                f"Canonical claim_id '{group.canonical_id}' not found in original claims."
-            )
-
-        selected = max(
-            available_ids,
-            key=lambda claim_id: (
-                _canonical_score(claim_by_id[claim_id]),
-                claim_id == original_canonical,
-                claim_id,
-            ),
-        )
-        merged_member_ids = [member_id for member_id in member_ids if member_id != selected]
-        preliminary.append(
-            ClaimGroup(
-                canonical_id=selected,
-                member_ids=merged_member_ids,
-                parent_id=group.parent_id,
-            )
-        )
-
-        for member_id in member_ids:
-            member_to_canonical[member_id] = selected
-
-    merged_by_canonical: dict[str, ClaimGroup] = {}
-    order: list[str] = []
-
-    for group in preliminary:
-        canonical_id = group.canonical_id
-        normalized_parent = None
-        if isinstance(group.parent_id, str) and group.parent_id.strip():
-            parent_candidate = member_to_canonical.get(group.parent_id.strip(), group.parent_id.strip())
-            if parent_candidate != canonical_id:
-                normalized_parent = parent_candidate
-
-        if canonical_id not in merged_by_canonical:
-            merged_by_canonical[canonical_id] = ClaimGroup(
-                canonical_id=canonical_id,
-                member_ids=_dedupe_ids(group.member_ids),
-                parent_id=normalized_parent,
-            )
-            order.append(canonical_id)
-            continue
-
-        existing = merged_by_canonical[canonical_id]
-        existing_members = _dedupe_ids([*existing.member_ids, *group.member_ids])
-        parent_id = existing.parent_id or normalized_parent
-        merged_by_canonical[canonical_id] = existing.model_copy(
-            update={
-                "member_ids": [member_id for member_id in existing_members if member_id != canonical_id],
-                "parent_id": parent_id if parent_id != canonical_id else None,
-            }
-        )
-
-    merged_groups = [merged_by_canonical[canonical_id] for canonical_id in order]
-    canonical_ids = {group.canonical_id for group in merged_groups}
-    normalized: list[ClaimGroup] = []
-
-    for group in merged_groups:
-        parent_id = group.parent_id
-        if parent_id is not None and parent_id not in canonical_ids:
-            raise ValueError(
-                f"Dedup parent_id '{parent_id}' for canonical '{group.canonical_id}' "
-                "does not resolve to a canonical group."
-            )
-        normalized.append(group)
-
-    return normalized
-
-
-def _members_by_canonical(groups: list[ClaimGroup]) -> dict[str, set[str]]:
-    members: dict[str, set[str]] = {}
-    for group in groups:
-        members[group.canonical_id] = {group.canonical_id, *group.member_ids}
-    return members
-
-
-def _seed_like_source(source_section: str) -> bool:
-    lowered = source_section.strip().lower()
-    return any(marker in lowered for marker in ("abstract", "introduction", "seed", "overview", "summary"))
-
-
-def _infer_within_type_parent_links(claims: list[RawClaim]) -> CrossTypeOutput:
-    by_type: dict[str, list[RawClaim]] = defaultdict(list)
     for claim in claims:
-        by_type[claim.claim_type.value].append(claim)
-
-    links: list[ParentChildLink] = []
-    for typed_claims in by_type.values():
-        token_cache = {claim.claim_id: _claim_tokens(claim.statement) for claim in typed_claims}
-        for child in typed_claims:
-            child_tokens = token_cache.get(child.claim_id, set())
-            if len(child_tokens) < 4:
-                continue
-
-            best_parent: RawClaim | None = None
-            best_score = 0.0
-            child_specificity = _canonical_score(child)
-
-            for parent in typed_claims:
-                if parent.claim_id == child.claim_id:
-                    continue
-                parent_tokens = token_cache.get(parent.claim_id, set())
-                if len(parent_tokens) < 3 or len(parent_tokens) >= len(child_tokens):
-                    continue
-
-                overlap = parent_tokens & child_tokens
-                if len(overlap) < 3:
-                    continue
-
-                coverage = len(overlap) / len(parent_tokens)
-                if coverage < 0.65:
-                    continue
-
-                specificity_gap = child_specificity - _canonical_score(parent)
-                if specificity_gap < 6:
-                    continue
-
-                seed_to_section_bonus = 2.0 if _seed_like_source(parent.source_section) and not _seed_like_source(child.source_section) else 0.0
-                score = coverage * 10.0 + specificity_gap + seed_to_section_bonus
-                if score > best_score:
-                    best_score = score
-                    best_parent = parent
-
-            if best_parent is None:
-                continue
-
-            links.append(
-                ParentChildLink(
-                    parent_id=best_parent.claim_id,
-                    child_id=child.claim_id,
-                    relationship="abstraction_refinement",
-                )
+        if claim.claim_id in used:
+            continue
+        members = [other for other in claims if other.claim_id not in used and _near_duplicate(claim, other)]
+        for member in members:
+            used.add(member.claim_id)
+        canonical = max(members, key=_claim_score)
+        kept.append(canonical)
+        groups.append(
+            ClaimGroup(
+                canonical_id=canonical.claim_id,
+                member_ids=[member.claim_id for member in members],
+                parent_id=None,
             )
+        )
+    return kept, groups
 
-    return CrossTypeOutput(parent_child_links=links)
+
+def _filter_assumptions(claims: list[RawClaim]) -> tuple[list[RawClaim], list[RawClaim], int]:
+    kept: list[RawClaim] = []
+    residual: list[RawClaim] = []
+    rejected = 0
+    for claim in claims:
+        if _MECHANISM_ASSUMPTION_RE.search(claim.statement):
+            residual.append(claim)
+            rejected += 1
+            continue
+        kept.append(claim)
+    return kept, residual, rejected
 
 
-def build_within_type_dedup_prompt(claims: list[RawClaim], claim_type: str) -> list[dict[str, str]]:
-    claim_lines = (
-        "\n".join(_format_claim_line(idx, claim) for idx, claim in enumerate(claims, start=1))
-        if claims
-        else "(no claims provided)"
-    )
-    return [
-        {
-            "role": "system",
-            "content": WITHIN_TYPE_DEDUP_PROMPT.format(n=len(claims), claim_type=claim_type),
-        },
-        {
-            "role": "user",
-            "content": (
-                "CLAIMS:\n"
-                f"{claim_lines}\n\n"
-                "Output `groups` with canonical_id/member_ids/parent_id."
-            ),
-        },
+def _choose_contexts(claims: list[RawClaim], cap: int) -> tuple[list[RawClaim], list[RawClaim]]:
+    ranked = sorted(claims, key=_claim_score, reverse=True)
+    return ranked[:cap], ranked[cap:]
+
+
+def _choose_methods(claims: list[RawClaim], cap: int) -> tuple[list[RawClaim], list[RawClaim], int]:
+    if not claims or cap <= 0:
+        return [], list(claims), 0
+
+    ranked = sorted(claims, key=_claim_score, reverse=True)
+    promoted: list[RawClaim] = []
+    residual: list[RawClaim] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    concept_collisions = 0
+
+    for claim in ranked:
+        tier = classify_method_abstraction(claim)
+        family = _concept_family(claim)
+        pair = (family, tier)
+        if pair in seen_pairs:
+            residual.append(claim)
+            concept_collisions += 1
+            continue
+        if tier == "submechanism":
+            residual.append(claim)
+            continue
+        if tier == "primitive" and "vllm" in _tokens(claim.statement):
+            residual.append(claim)
+            continue
+        if len(promoted) >= cap:
+            residual.append(claim)
+            continue
+        if tier == "system_realization" and any(classify_method_abstraction(existing) == "system_realization" for existing in promoted):
+            residual.append(claim)
+            concept_collisions += 1
+            continue
+        if tier == "primitive" and any(classify_method_abstraction(existing) == "primitive" for existing in promoted):
+            residual.append(claim)
+            concept_collisions += 1
+            continue
+        seen_pairs.add(pair)
+        promoted.append(claim)
+
+    if not promoted and ranked:
+        promoted = [max(ranked, key=_claim_score)]
+        residual = [claim for claim in ranked if claim.claim_id != promoted[0].claim_id]
+
+    promoted.sort(key=lambda claim: (classify_method_abstraction(claim) != "primitive", -_claim_score(claim)))
+    return promoted[:cap], residual + promoted[cap:], concept_collisions
+
+
+def _choose_results(claims: list[RawClaim], cap: int) -> tuple[list[RawClaim], list[RawClaim], int]:
+    ranked = sorted(claims, key=_claim_score, reverse=True)
+    by_family: dict[str, RawClaim] = {}
+    residual: list[RawClaim] = []
+    collisions = 0
+    for claim in ranked:
+        family = classify_result_family(claim)
+        existing = by_family.get(family)
+        if existing is None:
+            by_family[family] = claim
+            continue
+        collisions += 1
+        residual.append(claim)
+    promoted = list(by_family.values())
+    promoted.sort(key=_claim_score, reverse=True)
+    residual.extend(promoted[cap:])
+    return promoted[:cap], residual, collisions
+
+
+def _choose_capped(claims: list[RawClaim], cap: int) -> tuple[list[RawClaim], list[RawClaim]]:
+    ranked = sorted(claims, key=_claim_score, reverse=True)
+    return ranked[:cap], ranked[cap:]
+
+
+def _renumber_claims(claims: list[RawClaim]) -> list[RawClaim]:
+    counters: Counter[str] = Counter()
+    prefix_by_type = {
+        ClaimType.context: "C",
+        ClaimType.method: "M",
+        ClaimType.result: "R",
+        ClaimType.assumption: "A",
+        ClaimType.negative: "N",
+    }
+    renumbered: list[RawClaim] = []
+    for claim in claims:
+        prefix = prefix_by_type[claim.claim_type]
+        counters[prefix] += 1
+        renumbered.append(claim.model_copy(update={"claim_id": f"{prefix}{counters[prefix]}"}))
+    return renumbered
+
+
+def compress_claims_to_skeleton(claims: list[RawClaim], config: Any | None = None) -> CompressionResult:
+    contexts, methods, results, assumptions, negatives = [], [], [], [], []
+    normalized: list[RawClaim] = []
+    for claim in claims:
+        statement = _clean_text(claim.statement)
+        if not statement:
+            continue
+        normalized_claim = claim.model_copy(
+            update={
+                "statement": statement,
+                "source_section": _clean_text(claim.source_section) or claim.source_section,
+                "entity_names": [_clean_text(entity) for entity in claim.entity_names if _clean_text(entity)],
+            }
+        )
+        normalized.append(normalized_claim)
+
+    deduped, groups = _dedupe_preserving_best(normalized)
+    for claim in deduped:
+        if claim.claim_type == ClaimType.context:
+            contexts.append(claim)
+        elif claim.claim_type == ClaimType.method:
+            methods.append(claim)
+        elif claim.claim_type == ClaimType.result:
+            results.append(claim)
+        elif claim.claim_type == ClaimType.assumption:
+            assumptions.append(claim)
+        elif claim.claim_type == ClaimType.negative:
+            negatives.append(claim)
+
+    kept_assumptions, assumption_residual, assumption_rejected = _filter_assumptions(assumptions)
+    kept_contexts, residual_contexts = _choose_contexts(contexts, _cap(config, "context_cap", 1))
+    kept_methods, residual_methods, method_collisions = _choose_methods(methods, _cap(config, "method_cap", 2))
+    kept_results, residual_results, result_collisions = _choose_results(results, _cap(config, "result_family_cap", 4))
+    kept_assumptions, residual_assumptions = _choose_capped(kept_assumptions, _cap(config, "assumption_cap", 2))
+    kept_negatives, residual_negatives = _choose_capped(negatives, _cap(config, "negative_cap", 2))
+
+    promoted = [*kept_contexts, *kept_methods, *kept_results, *kept_assumptions, *kept_negatives]
+    promoted = _renumber_claims(promoted)
+
+    diagnostics: dict[str, Any] = {
+        "promoted_by_type": dict(Counter(claim.claim_type.value for claim in promoted)),
+        "concept_family_collisions": method_collisions + result_collisions,
+        "assumption_rejections_as_mechanism": assumption_rejected,
+        "assumption_candidates": len(assumptions),
+    }
+    residual = [
+        *residual_contexts,
+        *residual_methods,
+        *residual_results,
+        *assumption_residual,
+        *residual_assumptions,
+        *residual_negatives,
     ]
-
-
-def build_cross_type_prompt(claims: list[RawClaim]) -> list[dict[str, str]]:
-    claim_lines = (
-        "\n".join(_format_claim_line(idx, claim) for idx, claim in enumerate(claims, start=1))
-        if claims
-        else "(no claims provided)"
+    return CompressionResult(
+        promoted_claims=promoted,
+        residual_claims=residual,
+        claim_groups=groups,
+        diagnostics=diagnostics,
     )
-    return [
-        {"role": "system", "content": CROSS_TYPE_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                "CLAIMS:\n"
-                f"{claim_lines}\n\n"
-                "Return `parent_child_links` with parent_id, child_id, relationship."
-            ),
-        },
-    ]
 
 
 def build_dedup_prompt(claims: list[RawClaim]) -> list[dict[str, str]]:
-    return build_within_type_dedup_prompt(claims, claim_type="mixed")
+    if claims:
+        lines = [
+            f'{idx}. [{claim.claim_id}] {claim.claim_type.value.upper()}: "{_clean_text(claim.statement)}"'
+            for idx, claim in enumerate(claims, start=1)
+        ]
+        body = "\n".join(lines)
+    else:
+        body = "(no claims provided)"
+    return [
+        {
+            "role": "system",
+            "content": (
+                "Group close paraphrases that assert the same proposition. Ignore claim_id naming style and keep one canonical claim per group."
+            ),
+        },
+        {"role": "user", "content": body},
+    ]
 
 
-def _normalize_groups(groups: list[ClaimGroup]) -> list[ClaimGroup]:
+def apply_dedup(claims: list[RawClaim], dedup_output: Any) -> list[RawClaim]:
+    groups = list(getattr(dedup_output, "groups", []))
     if not groups:
-        return []
-
-    member_to_canonical: dict[str, str] = {}
-    canonical_ids: set[str] = set()
-    for group in groups:
-        canonical_ids.add(group.canonical_id)
-        for member_id in {group.canonical_id, *group.member_ids}:
-            member_to_canonical[member_id] = group.canonical_id
-
-    normalized: list[ClaimGroup] = []
-    for group in groups:
-        if group.parent_id is None:
-            normalized.append(group)
-            continue
-
-        resolved_parent = member_to_canonical.get(group.parent_id, group.parent_id)
-        if resolved_parent not in canonical_ids:
-            raise ValueError(
-                f"Dedup parent_id '{group.parent_id}' for canonical '{group.canonical_id}' "
-                "does not resolve to a canonical group."
-            )
-
-        normalized.append(
-            group.model_copy(
-                update={
-                    "parent_id": resolved_parent,
-                    "member_ids": _dedupe_ids(group.member_ids),
-                }
-            )
-        )
-
-    return normalized
-
-
-def _apply_parent_links(groups: list[ClaimGroup], links: CrossTypeOutput) -> list[ClaimGroup]:
-    by_canonical = {group.canonical_id: group for group in groups}
-    for link in links.parent_child_links:
-        parent_id = link.parent_id.strip()
-        child_id = link.child_id.strip()
-        if not parent_id or not child_id or parent_id == child_id:
-            continue
-        if parent_id not in by_canonical or child_id not in by_canonical:
-            continue
-        child = by_canonical[child_id]
-        by_canonical[child_id] = child.model_copy(update={"parent_id": parent_id})
-    return list(by_canonical.values())
-
-
-def apply_dedup(original_claims: list[RawClaim], dedup_output: DedupOutput) -> list[RawClaim]:
-    if not dedup_output.groups:
-        return list(original_claims)
-
-    claim_by_id = {claim.claim_id: claim for claim in original_claims}
-    normalized_groups = _canonicalize_groups(dedup_output.groups, claim_by_id)
-
-    canonical_claims: list[RawClaim] = []
-    seen: set[str] = set()
-
-    for group in normalized_groups:
-        if group.canonical_id in seen:
-            continue
-        if group.canonical_id not in claim_by_id:
-            raise ValueError(f"Canonical claim_id '{group.canonical_id}' not found in original claims.")
-
-        canonical_claims.append(claim_by_id[group.canonical_id])
-        seen.add(group.canonical_id)
-
-    return canonical_claims
-
-
-@dataclass(slots=True)
-class DedupBatchResult:
-    claim_type: str
-    input_claims: list[RawClaim]
-    canonical_claims: list[RawClaim]
-    groups: list[ClaimGroup]
-
-
-async def dedup_type_batch(
-    claims: list[RawClaim],
-    claim_type: str,
-    config: Any,
-) -> DedupBatchResult:
-    messages = build_within_type_dedup_prompt(claims, claim_type)
-    result = await call_model(
-        tier=_resolve_model_tier(config),
-        messages=messages,
-        response_schema=DedupBatchOutput,
-        config=config,
-    )
-    if not isinstance(result, DedupBatchOutput):
-        raise TypeError("Expected DedupBatchOutput from structured model call.")
+        return list(claims)
 
     claim_by_id = {claim.claim_id: claim for claim in claims}
-    groups = _canonicalize_groups(result.groups, claim_by_id)
-    if not groups:
-        groups = _singleton_groups(claims)
+    canonical_by_member: dict[str, str] = {}
+    for group in groups:
+        if group.canonical_id not in claim_by_id and group.canonical_id not in canonical_by_member:
+            members = [member_id for member_id in group.member_ids if member_id in claim_by_id]
+            if not members:
+                raise ValueError(f"canonical_id {group.canonical_id} is missing from claims")
+            best_member = max((claim_by_id[member_id] for member_id in members), key=_claim_score)
+            group.canonical_id = best_member.claim_id
+        for member_id in group.member_ids:
+            canonical_by_member[member_id] = group.canonical_id
 
-    canonical_claims = apply_dedup(claims, DedupOutput(groups=groups))
-    return DedupBatchResult(
-        claim_type=claim_type,
-        input_claims=claims,
-        canonical_claims=canonical_claims,
-        groups=groups,
-    )
-
-
-async def chunked_dedup(
-    all_claims: list[RawClaim],
-    config: Any,
-) -> tuple[list[RawClaim], list[ClaimGroup]]:
-    if not all_claims:
-        return [], []
-
-    by_type: dict[str, list[RawClaim]] = defaultdict(list)
-    for claim in all_claims:
-        by_type[claim.claim_type.value].append(claim)
-
-    all_claims_by_id = {claim.claim_id: claim for claim in all_claims}
-
-    pass1_tasks: list[asyncio.Task[DedupBatchResult]] = []
-    pass1_inputs: list[tuple[str, list[RawClaim]]] = []
-    pass1_groups: list[ClaimGroup] = []
-    for claim_type, claims in by_type.items():
-        if len(claims) <= 1:
-            pass1_groups.extend(_singleton_groups(claims))
+    canonicals: list[RawClaim] = []
+    seen: set[str] = set()
+    for claim in claims:
+        canonical_id = canonical_by_member.get(claim.claim_id, claim.claim_id)
+        if canonical_id in seen:
             continue
-        batches = _chunk_claims(claims, _MAX_WITHIN_TYPE_BATCH)
-        for batch in batches:
-            pass1_inputs.append((claim_type, batch))
-            pass1_tasks.append(asyncio.create_task(dedup_type_batch(batch, claim_type, config)))
-
-    pass1_results: list[DedupBatchResult | Exception] = []
-    if pass1_tasks:
-        pass1_results = cast(
-            list[DedupBatchResult | Exception],
-            await asyncio.gather(*pass1_tasks, return_exceptions=True),
-        )
-
-    for (_, claims), result in zip(pass1_inputs, pass1_results, strict=False):
-        if isinstance(result, Exception):
-            pass1_groups.extend(_singleton_groups(claims))
-            continue
-        pass1_groups.extend(result.groups)
-
-    normalized_pass1_groups = _canonicalize_groups(pass1_groups, all_claims_by_id)
-    pass1_canonical_claims = apply_dedup(all_claims, DedupOutput(groups=normalized_pass1_groups))
-    pass1_members = _members_by_canonical(normalized_pass1_groups)
-
-    pass2_by_type: dict[str, list[RawClaim]] = defaultdict(list)
-    for claim in pass1_canonical_claims:
-        pass2_by_type[claim.claim_type.value].append(claim)
-
-    pass1_canonical_by_id = {claim.claim_id: claim for claim in pass1_canonical_claims}
-    pass2_tasks: list[asyncio.Task[DedupBatchResult]] = []
-    pass2_inputs: list[tuple[str, list[RawClaim]]] = []
-    pass2_groups: list[ClaimGroup] = []
-
-    for claim_type, claims in pass2_by_type.items():
-        if len(claims) <= 1:
-            pass2_groups.extend(_singleton_groups(claims))
-            continue
-        pass2_inputs.append((claim_type, claims))
-        pass2_tasks.append(asyncio.create_task(dedup_type_batch(claims, claim_type, config)))
-
-    pass2_results: list[DedupBatchResult | Exception] = []
-    if pass2_tasks:
-        pass2_results = cast(
-            list[DedupBatchResult | Exception],
-            await asyncio.gather(*pass2_tasks, return_exceptions=True),
-        )
-
-    for (_, claims), result in zip(pass2_inputs, pass2_results, strict=False):
-        if isinstance(result, Exception):
-            pass2_groups.extend(_singleton_groups(claims))
-            continue
-        pass2_groups.extend(result.groups)
-
-    normalized_pass2_groups = _canonicalize_groups(pass2_groups, pass1_canonical_by_id)
-
-    expanded_groups: list[ClaimGroup] = []
-    for group in normalized_pass2_groups:
-        contributor_ids = {group.canonical_id, *group.member_ids}
-        expanded_members: set[str] = set()
-        for contributor_id in contributor_ids:
-            expanded_members.update(pass1_members.get(contributor_id, {contributor_id}))
-        expanded_groups.append(
-            ClaimGroup(
-                canonical_id=group.canonical_id,
-                member_ids=sorted(member_id for member_id in expanded_members if member_id != group.canonical_id),
-                parent_id=group.parent_id,
-            )
-        )
-
-    final_groups = _canonicalize_groups(expanded_groups, all_claims_by_id)
-    final_canonical_claims = apply_dedup(all_claims, DedupOutput(groups=final_groups))
-
-    inferred = _infer_within_type_parent_links(final_canonical_claims)
-    if inferred.parent_child_links:
-        final_groups = _apply_parent_links(final_groups, inferred)
-
-    if len(final_canonical_claims) <= 40 and final_canonical_claims:
-        try:
-            cross = await call_model(
-                tier=_resolve_model_tier(config),
-                messages=build_cross_type_prompt(final_canonical_claims),
-                response_schema=CrossTypeOutput,
-                config=config,
-            )
-            if isinstance(cross, CrossTypeOutput):
-                final_groups = _apply_parent_links(final_groups, cross)
-        except Exception:
-            pass
-
-    normalized_final_groups = _normalize_groups(final_groups)
-    deduped_canonical = apply_dedup(all_claims, DedupOutput(groups=normalized_final_groups))
-    _, residual_groups = _collapse_residual_duplicates(deduped_canonical)
-    if residual_groups:
-        merged_groups = _canonicalize_groups([*normalized_final_groups, *residual_groups], all_claims_by_id)
-        normalized_final_groups = _normalize_groups(merged_groups)
-        deduped_canonical = apply_dedup(all_claims, DedupOutput(groups=normalized_final_groups))
-    return deduped_canonical, normalized_final_groups
+        if canonical_id not in claim_by_id:
+            raise ValueError(f"canonical_id {canonical_id} is missing from claims")
+        seen.add(canonical_id)
+        canonicals.append(claim_by_id[canonical_id])
+    return canonicals
 
 
-async def hybrid_dedup_promoted(
-    promoted_claims: list[RawClaim],
-    config: Any,
-) -> tuple[list[RawClaim], list[ClaimGroup]]:
-    if not promoted_claims:
-        return [], []
-
-    deterministic_claims, deterministic_groups, uncertain_ids = _deterministic_canonicalize_promoted(promoted_claims)
-    deterministic_claim_by_id = {claim.claim_id: claim for claim in deterministic_claims}
-    normalized_det_groups = _canonicalize_groups(deterministic_groups, deterministic_claim_by_id)
-
-    resolved_claims, resolved_groups = await _semantic_disambiguate_uncertain_clusters(
-        deterministic_claims,
-        normalized_det_groups,
-        uncertain_ids,
-        config,
-    )
-
-    claim_by_id = {claim.claim_id: claim for claim in deterministic_claims}
-    merged_groups = _canonicalize_groups(resolved_groups, claim_by_id)
-    normalized_groups = _normalize_groups(merged_groups)
-    deduped_claims = apply_dedup(deterministic_claims, DedupOutput(groups=normalized_groups))
-    return deduped_claims, normalized_groups
-
-
-async def deduplicate_claims(claims: list[RawClaim], config: Any) -> DedupOutput:
-    _, groups = await chunked_dedup(claims, config)
+async def deduplicate_claims(claims: list[RawClaim], config: Any | None = None) -> DedupOutput:
+    _ = _resolve_model_tier(config)
+    _, groups = _dedupe_preserving_best(claims)
     return DedupOutput(groups=groups)
 
 
+async def chunked_dedup(claims: list[RawClaim], config: Any | None = None) -> tuple[list[RawClaim], list[ClaimGroup]]:
+    result = compress_claims_to_skeleton(claims, config)
+    return result.promoted_claims, result.claim_groups
+
+
+async def hybrid_dedup_promoted(claims: list[RawClaim], config: Any | None = None) -> tuple[list[RawClaim], list[ClaimGroup]]:
+    result = compress_claims_to_skeleton(claims, config)
+    return result.promoted_claims, result.claim_groups
+
+
 __all__ = [
+    "CompressionResult",
     "DEDUP_PROMPT",
-    "WITHIN_TYPE_DEDUP_PROMPT",
-    "CROSS_TYPE_PROMPT",
-    "build_dedup_prompt",
-    "build_within_type_dedup_prompt",
-    "build_cross_type_prompt",
     "apply_dedup",
-    "dedup_type_batch",
+    "build_dedup_prompt",
     "chunked_dedup",
-    "hybrid_dedup_promoted",
+    "classify_method_abstraction",
+    "classify_result_family",
+    "compress_claims_to_skeleton",
     "deduplicate_claims",
+    "hybrid_dedup_promoted",
 ]

@@ -1,392 +1,207 @@
+"""
+Claim:
+The rewritten pipeline should use Stage 2 compression as the sole semantic
+selection step, route residue into support details, and emit a stable final
+structure without semantic fallback stages.
+
+Plausible wrong implementations:
+- Keep more than two promoted methods because late stages still reinterpret nodes.
+- Drop residual claims instead of converting them to support details.
+- Fail to anchor support details back to promoted claims.
+- Preserve removed output fields from the old pipeline.
+"""
+
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
-import yaml
 
 import paper_decomposer.pipeline as pipeline_module
-from paper_decomposer.models import get_cost_tracker
-from paper_decomposer.pipeline import decompose_paper
 from paper_decomposer.schema import (
-    ClaimGroup,
+    AppSettings,
     ClaimLocalRole,
-    ClaimNode,
+    ClaimStructuralHints,
     ClaimType,
-    ParentPreference,
+    FacetedClaim,
+    GroundingType,
+    InterventionType,
     OneLiner,
-    PaperDecomposition,
+    PaperDecomposerConfig,
     PaperDocument,
     PaperMetadata,
-    PaperSkeletonCandidate,
+    ParentPreference,
     RawClaim,
+    RuntimeModelConfig,
+    RuntimePipelineConfig,
+    ScopeOfChange,
     Section,
     SectionArgumentCandidate,
     SectionDigestOutput,
-)
-
-ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = ROOT / "config.yaml"
-FIXTURE_PDF = ROOT / "fixtures" / "vllm.pdf"
-
-requires_api_key = pytest.mark.skipif(
-    not os.getenv("TOGETHER_API_KEY"),
-    reason="TOGETHER_API_KEY is not set.",
+    SeedOutput,
+    SupportDetail,
+    SupportDetailType,
+    SupportRelationshipType,
+    UniversalFacets,
 )
 
 
-def _iter_nodes(nodes: list[ClaimNode]):
-    for node in nodes:
-        yield node
-        yield from _iter_nodes(node.children)
-
-
-def _tree_depth(nodes: list[ClaimNode]) -> int:
-    if not nodes:
-        return 0
-
-    def node_depth(node: ClaimNode) -> int:
-        if not node.children:
-            return 1
-        return 1 + max(node_depth(child) for child in node.children)
-
-    return max(node_depth(node) for node in nodes)
-
-
-def _test_runtime_config(output_dir: Path) -> SimpleNamespace:
-    return SimpleNamespace(
-        pipeline=SimpleNamespace(
-            output={"output_dir": str(output_dir)},
-            seed={"model_tier": "small"},
-            section_extraction={"model_tier": "small", "max_concurrent": 1},
-            dedup={"model_tier": "medium"},
-            tree={"model_tier": "heavy"},
-        )
+@pytest.fixture()
+def settings(tmp_path: Path) -> AppSettings:
+    raw = PaperDecomposerConfig.model_validate(
+        {
+            "api": {"provider": "together", "base_url": "https://api.together.xyz/v1"},
+            "models": {
+                "small": {"model": "small", "temperature": 0.1, "max_tokens": 64},
+                "medium": {"model": "medium", "temperature": 0.1, "max_tokens": 64},
+                "heavy": {"model": "heavy", "temperature": 0.1, "max_tokens": 64},
+            },
+            "pipeline": {
+                "pdf": {"min_section_chars": 1, "max_section_chars": 100},
+                "seed": {},
+                "section_extraction": {},
+                "dedup": {},
+                "tree": {},
+                "output": {"output_dir": str(tmp_path)},
+            },
+        }
+    )
+    return AppSettings(
+        config_path="config.yaml",
+        api_key="test-key",
+        model_tiers={
+            "small": RuntimeModelConfig(model="small", temperature=0.1, max_tokens=64),
+            "medium": RuntimeModelConfig(model="medium", temperature=0.1, max_tokens=64),
+            "heavy": RuntimeModelConfig(model="heavy", temperature=0.1, max_tokens=64),
+        },
+        pipeline=RuntimePipelineConfig(
+            parser="pymupdf",
+            extract_captions=False,
+            extract_equations=False,
+            min_section_chars=1,
+            max_section_chars=100,
+            output={"output_dir": str(tmp_path)},
+        ),
+        raw=raw,
     )
 
 
-@pytest.mark.api
-@requires_api_key
-def test_pipeline_integration_vllm(tmp_path: Path) -> None:
-    with CONFIG_PATH.open("r", encoding="utf-8") as handle:
-        config_data = yaml.safe_load(handle)
-
-    config_data["pipeline"]["output"]["output_dir"] = str(tmp_path)
-    test_config = tmp_path / "config.pipeline.test.yaml"
-    test_config.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
-
-    result = asyncio.run(decompose_paper(str(FIXTURE_PDF), str(test_config)))
-
-    assert isinstance(result, PaperDecomposition)
-
-    output_files = sorted(tmp_path.glob("*.json"))
-    assert output_files, "Expected pipeline to write at least one output JSON file."
-
-    output_path = output_files[-1]
-    parsed = PaperDecomposition.model_validate_json(output_path.read_text(encoding="utf-8"))
-
-    assert len(parsed.claim_tree) >= 3
-    assert len(parsed.negative_claims) >= 1
-    assert 0.0 < parsed.extraction_cost_usd < 0.50
-
-    claim_count = sum(1 for _ in _iter_nodes(parsed.claim_tree))
-    tree_depth = _tree_depth(parsed.claim_tree)
-    cost_breakdown = get_cost_tracker()
-
-    print(f"\nOutput JSON: {output_path}")
-    print(
-        "Cost breakdown: "
-        f"calls={cost_breakdown['total_calls']} "
-        f"prompt_tokens={cost_breakdown['prompt_tokens']} "
-        f"completion_tokens={cost_breakdown['completion_tokens']} "
-        f"total_usd={cost_breakdown['total_cost_usd']:.4f}"
-    )
-    print(
-        "Tree summary: "
-        f"roots={len(parsed.claim_tree)} "
-        f"nodes={claim_count} "
-        f"depth={tree_depth} "
-        f"negatives={len(parsed.negative_claims)}"
-    )
-
-
-def test_pipeline_aborts_when_preflight_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    fake_pdf = tmp_path / "paper.pdf"
-    fake_pdf.write_bytes(b"%PDF-1.4")
-
-    config = _test_runtime_config(tmp_path)
+def test_decompose_paper_uses_bounded_semantic_backbone(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, settings: AppSettings) -> None:
     document = PaperDocument(
-        metadata=PaperMetadata(title="Test Paper", authors=["A"]),
+        metadata=PaperMetadata(title="PagedAttention", authors=["A"]),
         sections=[
-            Section(
-                section_number=None,
-                title="Abstract",
-                role="abstract",
-                body_text="Abstract text.",
-                char_count=14,
-            ),
-            Section(
-                section_number="1",
-                title="Method",
-                role="method",
-                body_text="Method details.",
-                char_count=15,
-            ),
+            Section(section_number="0", title="Abstract", role="abstract", body_text="Abstract text", char_count=20),
+            Section(section_number="4", title="Method", role="method", body_text="Method text", char_count=20),
+            Section(section_number="5", title="Eval", role="evaluation", body_text="Eval text", char_count=20),
         ],
         all_artifacts=[],
     )
 
-    monkeypatch.setattr(pipeline_module, "load_config", lambda _: config)
-    monkeypatch.setattr(pipeline_module, "parse_pdf", lambda *_: document)
-
-    async def _fail_preflight(*args, **kwargs):
-        raise RuntimeError("preflight down")
-
-    monkeypatch.setattr(pipeline_module, "preflight_model_tiers", _fail_preflight)
-
-    with pytest.raises(RuntimeError, match="preflight down"):
-        asyncio.run(decompose_paper(str(fake_pdf), "ignored.yaml"))
-
-
-def test_pipeline_handles_zero_phase2_candidates_with_skeleton_only(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_pdf = tmp_path / "paper.pdf"
-    fake_pdf.write_bytes(b"%PDF-1.4")
-
-    config = _test_runtime_config(tmp_path)
-    document = PaperDocument(
-        metadata=PaperMetadata(title="Test Paper", authors=["A"]),
-        sections=[
-            Section(
-                section_number=None,
-                title="Abstract",
-                role="abstract",
-                body_text="Abstract text.",
-                char_count=14,
-            ),
-            Section(
-                section_number="1",
-                title="Method",
-                role="method",
-                body_text="Method details.",
-                char_count=15,
-            ),
-        ],
-        all_artifacts=[],
+    seed_output = SeedOutput(
+        claims=[
+            RawClaim(claim_id="seed_c", claim_type=ClaimType.context, statement="Fragmentation limits batch size.", source_section="Abstract"),
+            RawClaim(claim_id="seed_m", claim_type=ClaimType.method, statement="PagedAttention is an attention algorithm that pages KV blocks.", source_section="Abstract"),
+        ]
     )
 
-    monkeypatch.setattr(pipeline_module, "load_config", lambda _: config)
-    monkeypatch.setattr(pipeline_module, "parse_pdf", lambda *_: document)
+    section_digest = SectionDigestOutput(
+        argument_candidates=[
+            SectionArgumentCandidate(
+                claim_id="cand_sys",
+                claim_type=ClaimType.method,
+                statement="vLLM is a serving runtime built around PagedAttention.",
+                source_section="4 Method",
+                local_role=ClaimLocalRole.top_level,
+                preferred_parent_type=ParentPreference.method,
+            ),
+            SectionArgumentCandidate(
+                claim_id="cand_kernel",
+                claim_type=ClaimType.method,
+                statement="A fused CUDA kernel gathers discontinuous blocks with coalesced reads.",
+                source_section="4 Method",
+                local_role=ClaimLocalRole.implementation_detail,
+                preferred_parent_type=ParentPreference.method,
+            ),
+            SectionArgumentCandidate(
+                claim_id="cand_res",
+                claim_type=ClaimType.result,
+                statement="vLLM reaches 2-4x higher throughput than Orca.",
+                source_section="5 Eval",
+            ),
+            SectionArgumentCandidate(
+                claim_id="cand_bad_assumption",
+                claim_type=ClaimType.assumption,
+                statement="The runtime allocates a new block only when prior blocks are full.",
+                source_section="4 Method",
+            ),
+            SectionArgumentCandidate(
+                claim_id="cand_good_assumption",
+                claim_type=ClaimType.assumption,
+                statement="Benefits depend on concurrent requests and GPU memory capacity.",
+                source_section="6 Limitations",
+            ),
+        ],
+        support_details=[
+            SupportDetail(
+                support_detail_id="SD_existing",
+                detail_type=SupportDetailType.implementation_fact,
+                text="Logical blocks map to non-contiguous physical blocks.",
+                source_section="4 Method",
+                anchor_claim_id=None,
+                candidate_anchor_ids=[],
+                relationship_type=SupportRelationshipType.implements,
+                confidence=0.4,
+                evidence_ids=[],
+            )
+        ],
+    )
 
-    async def _ok_preflight(*args, **kwargs):
+    async def _noop_preflight(*args, **kwargs):
+        _ = (args, kwargs)
         return None
 
-    async def _skeleton(*args, **kwargs):
+    async def _fake_seed(*args, **kwargs):
         _ = (args, kwargs)
-        return PaperSkeletonCandidate(
-            context_roots=[
-                RawClaim(
-                    claim_id="s1",
-                    claim_type=ClaimType.context,
-                    statement="Need better memory management.",
-                    source_section="Abstract",
-                )
-            ],
-            core_methods=[],
-            topline_results=[],
-            assumptions=[],
-            negatives=[],
+        return seed_output
+
+    async def _fake_section(*args, **kwargs):
+        _ = (args, kwargs)
+        return section_digest
+
+    async def _fake_facets(claim: RawClaim, source, config):
+        _ = (source, config)
+        return FacetedClaim(
+            claim=claim,
+            universal_facets=UniversalFacets(
+                intervention_types=[InterventionType.algorithm],
+                scope=ScopeOfChange.module,
+                improves_or_replaces="baseline attention",
+                core_tradeoff="UNSPECIFIED",
+                grounding=GroundingType.qualitative,
+                analogy_source=None,
+            ),
         )
 
-    async def _empty_digest(*args, **kwargs):
-        _ = (args, kwargs)
-        return SectionDigestOutput(argument_candidates=[], support_details=[])
+    monkeypatch.setattr(pipeline_module, "load_config", lambda path: settings)
+    monkeypatch.setattr(pipeline_module, "parse_pdf", lambda path, config: document)
+    monkeypatch.setattr(pipeline_module, "preflight_model_tiers", _noop_preflight)
+    monkeypatch.setattr(pipeline_module, "extract_seed", _fake_seed)
+    monkeypatch.setattr(pipeline_module, "extract_section_digest", _fake_section)
+    monkeypatch.setattr(pipeline_module, "extract_facets", _fake_facets)
 
-    monkeypatch.setattr(pipeline_module, "preflight_model_tiers", _ok_preflight)
-    monkeypatch.setattr(pipeline_module, "extract_skeleton", _skeleton)
-    monkeypatch.setattr(pipeline_module, "extract_section_digest", _empty_digest)
+    result = asyncio.run(pipeline_module.decompose_paper(str(tmp_path / "paper.pdf"), "ignored.yaml"))
+    all_nodes = []
+    stack = list(result.claim_tree)
+    while stack:
+        node = stack.pop()
+        all_nodes.append(node)
+        stack.extend(node.children)
 
-    result = asyncio.run(decompose_paper(str(fake_pdf), "ignored.yaml"))
-    assert isinstance(result, PaperDecomposition)
+    method_nodes = [node for node in all_nodes if node.claim_type == ClaimType.method]
+
     assert len(result.claim_tree) == 1
-
-
-def test_pipeline_passes_deduplicated_negatives_to_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    fake_pdf = tmp_path / "paper.pdf"
-    fake_pdf.write_bytes(b"%PDF-1.4")
-
-    config = _test_runtime_config(tmp_path)
-    document = PaperDocument(
-        metadata=PaperMetadata(title="Test Paper", authors=["A"]),
-        sections=[
-            Section(
-                section_number=None,
-                title="Abstract",
-                role="abstract",
-                body_text="Abstract text.",
-                char_count=14,
-            ),
-            Section(
-                section_number="1",
-                title="Limitations",
-                role="discussion",
-                body_text="Discussion details.",
-                char_count=20,
-            ),
-        ],
-        all_artifacts=[],
-    )
-
-    seed_context = RawClaim(
-        claim_id="c1",
-        claim_type=ClaimType.context,
-        statement="Memory fragmentation hurts serving efficiency.",
-        source_section="Abstract",
-    )
-    negative_a = RawClaim(
-        claim_id="n1",
-        claim_type=ClaimType.negative,
-        statement="Online compaction is too expensive.",
-        source_section="1 Limitations",
-    )
-    negative_b = RawClaim(
-        claim_id="n2",
-        claim_type=ClaimType.negative,
-        statement="Online compaction is too expensive.",
-        source_section="1 Limitations",
-    )
-
-    monkeypatch.setattr(pipeline_module, "load_config", lambda _: config)
-    monkeypatch.setattr(pipeline_module, "parse_pdf", lambda *_: document)
-
-    async def _ok_preflight(*args, **kwargs):
-        _ = (args, kwargs)
-        return None
-
-    async def _skeleton(*args, **kwargs):
-        _ = (args, kwargs)
-        return PaperSkeletonCandidate(
-            context_roots=[seed_context],
-            core_methods=[],
-            topline_results=[],
-            assumptions=[],
-            negatives=[],
-        )
-
-    async def _section(*args, **kwargs):
-        _ = (args, kwargs)
-        return SectionDigestOutput(
-            argument_candidates=[
-                SectionArgumentCandidate(
-                    claim_id=negative_a.claim_id,
-                    claim_type=negative_a.claim_type,
-                    statement=negative_a.statement,
-                    source_section=negative_a.source_section,
-                ),
-                SectionArgumentCandidate(
-                    claim_id=negative_b.claim_id,
-                    claim_type=negative_b.claim_type,
-                    statement=negative_b.statement,
-                    source_section=negative_b.source_section,
-                ),
-            ],
-            support_details=[],
-        )
-
-    async def _dedup(*args, **kwargs):
-        _ = (args, kwargs)
-        return [seed_context, negative_a], [ClaimGroup(canonical_id="n1", member_ids=["n2"], parent_id=None)]
-
-    captured: dict[str, object] = {}
-
-    async def _assemble_tree(
-        *,
-        metadata,
-        claims,
-        faceted,
-        negatives,
-        artifacts,
-        config,
-        claim_groups,
-        support_details,
-    ):
-        _ = (faceted, artifacts, config, support_details)
-        captured["claims"] = list(claims)
-        captured["negatives"] = list(negatives)
-        captured["claim_groups"] = list(claim_groups or [])
-        return PaperDecomposition(
-            metadata=metadata,
-            one_liner=OneLiner(achieved="ok", via="ok", because="ok"),
-            claim_tree=[],
-            negative_claims=list(negatives),
-            all_artifacts=[],
-            extraction_cost_usd=0.0,
-        )
-
-    monkeypatch.setattr(pipeline_module, "preflight_model_tiers", _ok_preflight)
-    monkeypatch.setattr(pipeline_module, "extract_skeleton", _skeleton)
-    monkeypatch.setattr(pipeline_module, "extract_section_digest", _section)
-    monkeypatch.setattr(pipeline_module, "hybrid_dedup_promoted", _dedup)
-    monkeypatch.setattr(pipeline_module, "assemble_tree_deterministic", _assemble_tree)
-
-    _ = asyncio.run(decompose_paper(str(fake_pdf), "ignored.yaml"))
-
-    negatives = captured["negatives"]
-    assert isinstance(negatives, list)
-    assert [claim.claim_id for claim in negatives] == ["n1"]
-
-    groups = captured["claim_groups"]
-    assert isinstance(groups, list)
-    assert len(groups) == 1
-    assert groups[0].canonical_id == "n1"
-
-
-def test_normalize_claim_semantics_retags_context_claim_with_result_signal() -> None:
-    claims = [
-        RawClaim(
-            claim_id="c_raw",
-            claim_type=ClaimType.context,
-            statement="vLLM improves throughput by 2-4x while keeping latency comparable to baselines.",
-            source_section="Abstract",
-        )
-    ]
-
-    normalized = pipeline_module._normalize_claim_semantics(claims)
-
-    assert len(normalized) == 1
-    assert normalized[0].claim_type == ClaimType.result
-    assert normalized[0].structural_hints is not None
-    assert normalized[0].structural_hints.local_role == ClaimLocalRole.empirical_finding
-    assert normalized[0].structural_hints.preferred_parent_type == ParentPreference.method
-
-
-def test_collapse_claim_duplicates_prefers_claim_with_stronger_provenance() -> None:
-    weak = RawClaim(
-        claim_id="m1",
-        claim_type=ClaimType.method,
-        statement="PagedAttention maps logical KV blocks to physical blocks.",
-        source_section="abstract",
-        evidence=[],
-        entity_names=["PagedAttention"],
-    )
-    strong = RawClaim(
-        claim_id="m2",
-        claim_type=ClaimType.method,
-        statement="PagedAttention maps logical KV blocks to physical blocks.",
-        source_section="4.1 PagedAttention",
-        evidence=[
-            {"artifact_id": "fig_1", "role": "supports"},
-            {"artifact_id": "table_2", "role": "supports"},
-        ],
-        entity_names=["PagedAttention", "KV cache"],
-    )
-
-    collapsed = pipeline_module._collapse_claim_duplicates([weak, strong])
-
-    assert len(collapsed) == 1
-    assert collapsed[0].claim_id == "m2"
+    assert len(method_nodes) <= 2
+    assert any(detail.anchor_claim_id for detail in result.support_details)
+    assert not hasattr(result, "negative_claims")
+    assert any(path.name.startswith("PagedAttention") for path in tmp_path.iterdir())

@@ -97,6 +97,8 @@ def _coerce_string_list(value: Any) -> list[str]:
 
 
 class ApiConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     provider: str
     base_url: str
     env_key_var: str = "TOGETHER_API_KEY"
@@ -105,6 +107,8 @@ class ApiConfig(BaseModel):
 
 
 class ModelTierConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     model: str
     context_length: int | None = None
     supports_structured_output: bool | None = None
@@ -116,12 +120,16 @@ class ModelTierConfig(BaseModel):
 
 
 class ModelsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     small: ModelTierConfig
     medium: ModelTierConfig
     heavy: ModelTierConfig
 
 
 class PdfPipelineConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     parser: str = "pymupdf"
     extract_captions: bool = False
     extract_equations: bool = False
@@ -130,6 +138,8 @@ class PdfPipelineConfig(BaseModel):
 
 
 class PipelineConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     pdf: PdfPipelineConfig
     seed: dict[str, Any] = Field(default_factory=dict)
     section_extraction: dict[str, Any] = Field(default_factory=dict)
@@ -148,12 +158,16 @@ class PaperDecomposerConfig(BaseModel):
 
 
 class RuntimeModelConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     model: str
     temperature: float
     max_tokens: int
 
 
 class RuntimePipelineConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     parser: str
     extract_captions: bool
     extract_equations: bool
@@ -167,6 +181,8 @@ class RuntimePipelineConfig(BaseModel):
 
 
 class AppSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     config_path: str
     api_key: str
     model_tiers: dict[ModelTier, RuntimeModelConfig]
@@ -414,7 +430,6 @@ class SupportDetail(BaseModel):
     relationship_type: SupportRelationshipType
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     evidence_ids: list[str] = Field(default_factory=list)
-    promotable: bool = False
 
     @field_validator("text", mode="before")
     @classmethod
@@ -985,25 +1000,51 @@ class PaperDecomposition(BaseModel):
     metadata: PaperMetadata
     one_liner: OneLiner
     claim_tree: list[ClaimNode] = Field(default_factory=list)
-    negative_claims: list[RawClaim] = Field(default_factory=list)
     support_details: list[SupportDetail] = Field(default_factory=list)
     all_artifacts: list[EvidenceArtifact] = Field(default_factory=list)
     extraction_cost_usd: float = 0.0
 
     @model_validator(mode="after")
-    def _validate_unique_canonical_labels(self) -> "PaperDecomposition":
-        seen: set[str] = set()
+    def _validate_tree_contract(self) -> "PaperDecomposition":
+        seen_labels: set[str] = set()
+        seen_ids: set[str] = set()
+        nodes_by_id: dict[str, ClaimNode] = {}
+        descendants_by_id: dict[str, set[str]] = {}
 
-        def walk(nodes: list[ClaimNode]) -> None:
+        def walk(nodes: list[ClaimNode]) -> set[str]:
+            subtree_ids: set[str] = set()
             for node in nodes:
-                if node.canonical_label in seen:
+                if node.claim_id in seen_ids:
+                    raise ValueError(f"claim_id must be unique within paper: {node.claim_id}")
+                if node.canonical_label in seen_labels:
                     raise ValueError(
                         f"canonical_label must be unique within paper: {node.canonical_label}"
                     )
-                seen.add(node.canonical_label)
-                walk(node.children)
+                seen_ids.add(node.claim_id)
+                seen_labels.add(node.canonical_label)
+                nodes_by_id[node.claim_id] = node
+                child_ids = walk(node.children)
+                descendants_by_id[node.claim_id] = set(child_ids)
+                subtree_ids.add(node.claim_id)
+                subtree_ids.update(child_ids)
+            return subtree_ids
 
         walk(self.claim_tree)
+
+        for claim_id, node in nodes_by_id.items():
+            unique_deps: set[str] = set()
+            for dependency_id in node.depends_on:
+                if dependency_id == claim_id:
+                    raise ValueError(f"depends_on may not self-reference: {claim_id}")
+                if dependency_id not in nodes_by_id:
+                    raise ValueError(f"depends_on must reference an existing claim_id: {dependency_id}")
+                if dependency_id in unique_deps:
+                    raise ValueError(f"depends_on entries must be unique per node: {claim_id}")
+                if dependency_id in descendants_by_id.get(claim_id, set()):
+                    raise ValueError(
+                        f"depends_on may not reference a descendant node: {claim_id} -> {dependency_id}"
+                    )
+                unique_deps.add(dependency_id)
         return self
 
 

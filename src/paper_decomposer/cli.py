@@ -61,7 +61,7 @@ def _run_single(pdf_path: Path, config_path: str, dry_run: bool) -> None:
     result = asyncio.run(decompose_paper(str(pdf_path), config_path))
     console.print(
         f"[green]Done[/green] {pdf_path.name} | "
-        f"roots={len(result.claim_tree)} negatives={len(result.negative_claims)} "
+        f"roots={len(result.claim_tree)} support_details={len(result.support_details)} "
         f"cost=${result.extraction_cost_usd:.4f}"
     )
 

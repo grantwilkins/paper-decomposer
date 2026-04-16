@@ -1032,14 +1032,14 @@ def _infer_support_detail_type(claim: RawClaim, section: Section) -> SupportDeta
     lowered = claim.statement.lower()
     if _API_SURFACE_RE.search(lowered):
         return SupportDetailType.api_surface
+    if re.search(r"\b(kernel|warp|cuda|coalesced|latency overhead)\b", lowered):
+        return SupportDetailType.local_kernel_optimization
     if _FRAMEWORK_USAGE_RE.search(lowered):
         return SupportDetailType.framework_dependency
     if _is_procedural_method_claim(claim):
         return SupportDetailType.procedural_step
     if _has_evaluation_finding_signal(claim):
         return SupportDetailType.numeric_support
-    if re.search(r"\b(kernel|warp|cuda|coalesced|latency overhead)\b", lowered):
-        return SupportDetailType.local_kernel_optimization
     if _is_implementation_section(section) or claim.claim_type == ClaimType.method:
         return SupportDetailType.implementation_fact
     return SupportDetailType.numeric_support
@@ -1078,8 +1078,32 @@ def _claim_to_support_detail(claim: RawClaim, section: Section, index: int) -> S
         relationship_type=_relationship_for_support_type(detail_type),
         confidence=_support_confidence(claim),
         evidence_ids=[pointer.artifact_id for pointer in claim.evidence if pointer.artifact_id.strip()],
-        promotable=detail_type not in _NON_PROMOTABLE_SUPPORT_TYPES,
     )
+
+
+def _should_route_to_support_detail(claim: RawClaim, section: Section) -> bool:
+    if _matches_hard_suppression_pattern(claim):
+        return True
+
+    detail_type = _infer_support_detail_type(claim, section)
+    if detail_type in {
+        SupportDetailType.api_surface,
+        SupportDetailType.framework_dependency,
+        SupportDetailType.procedural_step,
+    }:
+        return True
+
+    if claim.claim_type != ClaimType.method:
+        return False
+
+    hints = claim.structural_hints
+    if hints is not None and hints.local_role == ClaimLocalRole.implementation_detail:
+        return True
+
+    lowered = claim.statement.lower()
+    if detail_type == SupportDetailType.local_kernel_optimization:
+        return True
+    return bool(re.search(r"\b(kernel|scheduler|allocator|cache manager|block table|warp|cuda)\b", lowered))
 
 
 def _is_argument_candidate(claim: RawClaim, section: Section) -> bool:
@@ -1123,10 +1147,10 @@ async def extract_section_digest(
     support_details: list[SupportDetail] = []
 
     for idx, claim in enumerate(extraction.claims, start=1):
-        if _is_argument_candidate(claim, section):
+        if _should_route_to_support_detail(claim, section):
+            support_details.append(_claim_to_support_detail(claim, section, idx))
+        else:
             argument_candidates.append(_to_section_argument_candidate(claim))
-            continue
-        support_details.append(_claim_to_support_detail(claim, section, idx))
 
     return SectionDigestOutput(
         argument_candidates=argument_candidates,

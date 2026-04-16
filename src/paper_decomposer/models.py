@@ -640,49 +640,28 @@ async def call_model_with_fallback(
     config: Any | None = None,
 ) -> TResponseModel | str:
     if response_schema is None:
-        return await call_model(tier=tier, messages=messages, response_schema=None, config=config)
+        return await call_model(
+            tier=tier,
+            messages=messages,
+            response_schema=None,
+            config=config,
+        )
 
     try:
-        result = await call_model(
+        return await call_model(
             tier=tier,
             messages=messages,
             response_schema=response_schema,
             config=config,
         )
-        if isinstance(result, response_schema):
-            return result
-        raise TypeError(f"Expected {response_schema.__name__} from structured model call.")
     except (ValidationError, ValueError, TypeError, json.JSONDecodeError):
-        pass
-
-    console.print(f"  ({tier}) [yellow]Falling back to unstructured output[/yellow]")
-    required_fields = list(response_schema.model_fields.keys())
-    json_hint = (
-        "\n\nRespond with ONLY valid JSON matching this structure. "
-        "No markdown fences, no preamble.\n"
-        f"Required fields: {required_fields}"
-    )
-
-    fallback_messages = [dict(message) for message in messages]
-    for idx in range(len(fallback_messages) - 1, -1, -1):
-        content = fallback_messages[idx].get("content")
-        if not isinstance(content, str):
-            continue
-        fallback_messages[idx]["content"] = f"{content}{json_hint}"
-        break
-    else:
-        fallback_messages.append({"role": "user", "content": json_hint.strip()})
-
-    raw_text = await call_model(
-        tier=tier,
-        messages=fallback_messages,
-        response_schema=None,
-        config=config,
-    )
-    if not isinstance(raw_text, str):
-        raw_text = str(raw_text)
-
-    return _parse_structured_content(raw_text, response_schema)
+        repaired_messages = _append_json_repair_suffix(messages)
+        return await call_model(
+            tier=tier,
+            messages=repaired_messages,
+            response_schema=response_schema,
+            config=config,
+        )
 
 
 async def preflight_model_tiers(
