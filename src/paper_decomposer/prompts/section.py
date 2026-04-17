@@ -314,6 +314,16 @@ _EVAL_FINDING_CUE_RE = re.compile(
     r"(ablation|benchmark|baseline|dataset|experiment|measured|measures|throughput|latency|accuracy|f1|bleu|rouge)",
     re.IGNORECASE,
 )
+_RUNTIME_LEVEL_SCOPE_RE = re.compile(
+    r"\b(serving runtime|serving system|serving engine|distributed execution|gpu workers|"
+    r"centralized scheduler|across requests|shared by all gpu workers|request scheduling)\b",
+    re.IGNORECASE,
+)
+_PROBLEM_SUPPORT_RE = re.compile(
+    r"\b(waste|fragmentation|duplicate|duplication|redundant|batch size|bottleneck|"
+    r"limits?|limiting|memory challenge|memory waste|cache memory|throughput)\b",
+    re.IGNORECASE,
+)
 _TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 _STOPWORDS = {
     "a",
@@ -618,6 +628,8 @@ def _infer_local_role(claim_type: ClaimType, statement: str) -> ClaimLocalRole:
         return ClaimLocalRole.context_gap
     if claim_type == ClaimType.method:
         if _HIGH_LEVEL_METHOD_RE.search(lowered):
+            return ClaimLocalRole.top_level
+        if _RUNTIME_LEVEL_SCOPE_RE.search(lowered):
             return ClaimLocalRole.top_level
         if re.search(r"\b(kernel|allocator|lookup|metadata|scheduler|buffer|table|cache manager|logical block|physical block)\b", lowered):
             return ClaimLocalRole.implementation_detail
@@ -1110,6 +1122,8 @@ def _should_route_to_support_detail(claim: RawClaim, section: Section) -> bool:
     lowered = claim.statement.lower()
     if detail_type == SupportDetailType.local_kernel_optimization:
         return True
+    if _RUNTIME_LEVEL_SCOPE_RE.search(lowered):
+        return False
     return bool(re.search(r"\b(kernel|scheduler|allocator|cache manager|block table|warp|cuda)\b", lowered))
 
 

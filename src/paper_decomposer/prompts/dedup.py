@@ -39,6 +39,11 @@ _MECHANISM_ASSUMPTION_RE = re.compile(
     r"cop(?:y|ies|ied|ying)|schedul(?:e|es|ed|ing)|map(?:s|ped|ping)?|implement(?:s|ed|ing)?)\b",
     re.IGNORECASE,
 )
+_METHOD_RESTATEMENT_ASSUMPTION_RE = re.compile(
+    r"\b(pagedattention|paging|virtual memory|block table|logical block|physical block|"
+    r"kv[-\s]?cache|algorithm|attention|approach assumes that)\b",
+    re.IGNORECASE,
+)
 _PRIMITIVE_HINT_RE = re.compile(
     r"\b(pagedattention|attention algorithm|algorithm|paging|blockwise computation|non-contiguous memory)\b",
     re.IGNORECASE,
@@ -84,6 +89,24 @@ _BASELINE_COMPARISON_RE = re.compile(
 _MATCHED_LATENCY_RE = re.compile(r"\b(same latency|identical latency|latency constraint|slo)\b", re.IGNORECASE)
 _AGGREGATE_PERFORMANCE_RE = re.compile(
     r"\b(throughput|request rate|request rates|requests concurrently|concurren|batch size)\b",
+    re.IGNORECASE,
+)
+_BENCHMARK_SPECIFIC_RE = re.compile(
+    r"\b(sharegpt|alpaca|chatbot|workload|trace|prompt|token|opt-\d+b|llama-\d+b|beam|sampling)\b",
+    re.IGNORECASE,
+)
+_BROAD_HEADLINE_RE = re.compile(
+    r"\b(state[-\s]?of[-\s]?the[-\s]?art|popular llms|without any loss|without loss|"
+    r"comparable latency|longer sequences|larger models|more complex decoding)\b",
+    re.IGNORECASE,
+)
+_PROBLEM_ROOT_RE = re.compile(
+    r"\b(waste|fragmentation|duplicate|duplication|redundant|batch size|throughput|bottleneck|"
+    r"memory waste|cache memory|limits?|limiting|feasible batch size)\b",
+    re.IGNORECASE,
+)
+_SCOPED_CONTEXT_RE = re.compile(
+    r"\b(beam|sampling|shared beams|prompt kv cache|generation-phase|parallel sampling|share across samples)\b",
     re.IGNORECASE,
 )
 _LABEL_BLOCKLIST = {
@@ -246,6 +269,20 @@ def _has_runtime_scope(text: str) -> bool:
     return bool(_RUNTIME_ROLE_RE.search(text))
 
 
+def _is_explicit_system_realization(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(vllm|system|runtime|serving engine|serving system)\b.{0,80}\b("
+            r"is|uses?|employs?|leverages?|coordinates?|manages?|supports?)\b",
+            text,
+        )
+        or re.search(
+            r"\b(centralized scheduler|distributed execution|across requests|shared by all gpu workers)\b",
+            text,
+        )
+    )
+
+
 def _is_local_mechanism_dominated(text: str) -> bool:
     verb_hits = len(_LOCAL_MECHANISM_VERB_RE.findall(text))
     return verb_hits >= 2 and bool(_LOCAL_MECHANISM_NOUN_RE.search(text))
@@ -258,15 +295,20 @@ def classify_method_abstraction(claim: RawClaim) -> str:
     system_hits = len(_SYSTEM_HINT_RE.findall(text))
     has_runtime_role = _has_runtime_role(text)
     has_runtime_scope = _has_runtime_scope(text)
+    explicit_system_realization = _is_explicit_system_realization(text)
     local_mechanism = bool(_SUBMECHANISM_HINT_RE.search(text) or _is_local_mechanism_dominated(text))
     if primitive_hits and primitive_hits >= system_hits and not has_runtime_role:
         return "primitive"
     if local_mechanism:
+        if explicit_system_realization:
+            return "system_realization"
         if has_runtime_scope and local_role != ClaimLocalRole.implementation_detail:
             return "system_realization"
         return "submechanism"
     if primitive_hits and primitive_hits >= system_hits:
         return "primitive"
+    if explicit_system_realization:
+        return "system_realization"
     if has_runtime_role and local_role != ClaimLocalRole.implementation_detail:
         return "system_realization"
     if _METHOD_VERB_RE.search(text) and local_role == ClaimLocalRole.top_level and has_runtime_role:
@@ -297,22 +339,38 @@ def _result_tree_family_priority(family: str) -> int:
     return priorities.get(family, 4)
 
 
+def _benchmark_specificity_penalty(text: str) -> int:
+    return len(_BENCHMARK_SPECIFIC_RE.findall(text))
+
+
+def _headline_breadth_bonus(claim: RawClaim) -> int:
+    text = _clean_text(claim.statement).lower()
+    bonus = 0
+    if _BROAD_HEADLINE_RE.search(text):
+        bonus += 2
+    if claim.source_section.strip().lower() == "abstract":
+        bonus += 1
+    if re.search(r"\b(state[-\s]?of[-\s]?the[-\s]?art|baselines?|systems?)\b", text):
+        bonus += 1
+    return bonus
+
+
 def _result_summary_priority(claim: RawClaim) -> tuple[int, float]:
     text = _clean_text(claim.statement).lower()
     family = classify_result_family(claim)
     if family == "headline_comparative_performance":
         if _BASELINE_COMPARISON_RE.search(text) and _MATCHED_LATENCY_RE.search(text):
-            return (0, -_claim_score(claim))
+            return (0, _benchmark_specificity_penalty(text), -_headline_breadth_bonus(claim), -_claim_score(claim))
         if _AGGREGATE_PERFORMANCE_RE.search(text):
-            return (1, -_claim_score(claim))
-        return (2, -_claim_score(claim))
+            return (1, _benchmark_specificity_penalty(text), -_headline_breadth_bonus(claim), -_claim_score(claim))
+        return (2, _benchmark_specificity_penalty(text), -_headline_breadth_bonus(claim), -_claim_score(claim))
     if family == "memory_mechanism_validation":
-        return (3, -_claim_score(claim))
+        return (3, _benchmark_specificity_penalty(text), -_headline_breadth_bonus(claim), -_claim_score(claim))
     if family == "decoding_mode_improvement":
-        return (4, -_claim_score(claim))
+        return (4, _benchmark_specificity_penalty(text), -_headline_breadth_bonus(claim), -_claim_score(claim))
     if family == "constraint_observation":
-        return (5, -_claim_score(claim))
-    return (6, -_claim_score(claim))
+        return (5, _benchmark_specificity_penalty(text), -_headline_breadth_bonus(claim), -_claim_score(claim))
+    return (6, _benchmark_specificity_penalty(text), -_headline_breadth_bonus(claim), -_claim_score(claim))
 
 
 def select_result_for_one_liner(claims: list[RawClaim]) -> RawClaim | None:
@@ -320,6 +378,29 @@ def select_result_for_one_liner(claims: list[RawClaim]) -> RawClaim | None:
     if not results:
         return None
     return min(results, key=_result_summary_priority)
+
+
+def _context_selection_score(claim: RawClaim) -> float:
+    text = _clean_text(claim.statement).lower()
+    score = _claim_score(claim)
+    if _PROBLEM_ROOT_RE.search(text):
+        score += 4.0
+    if re.search(r"\b(existing|prior|systems?)\b", text):
+        score += 1.2
+    if claim.source_section.strip().lower() in {"abstract", "1 introduction", "introduction"}:
+        score += 0.8
+    if _SCOPED_CONTEXT_RE.search(text):
+        score -= 3.0
+    if re.search(r"\b(can be shared|memory savings through shared beams|heterogeneous sharing)\b", text):
+        score -= 2.0
+    return score
+
+
+def select_context_for_one_liner(claims: list[RawClaim]) -> RawClaim | None:
+    contexts = [claim for claim in claims if claim.claim_type == ClaimType.context]
+    if not contexts:
+        return None
+    return max(contexts, key=_context_selection_score)
 
 
 def _concept_family(claim: RawClaim) -> str:
@@ -367,7 +448,8 @@ def _filter_assumptions(claims: list[RawClaim]) -> tuple[list[RawClaim], list[Ra
     residual: list[RawClaim] = []
     rejected = 0
     for claim in claims:
-        if _MECHANISM_ASSUMPTION_RE.search(claim.statement):
+        statement = claim.statement
+        if _MECHANISM_ASSUMPTION_RE.search(statement) or _METHOD_RESTATEMENT_ASSUMPTION_RE.search(statement):
             residual.append(claim)
             rejected += 1
             continue
@@ -376,7 +458,7 @@ def _filter_assumptions(claims: list[RawClaim]) -> tuple[list[RawClaim], list[Ra
 
 
 def _choose_contexts(claims: list[RawClaim], cap: int) -> tuple[list[RawClaim], list[RawClaim]]:
-    ranked = sorted(claims, key=_claim_score, reverse=True)
+    ranked = sorted(claims, key=_context_selection_score, reverse=True)
     return ranked[:cap], ranked[cap:]
 
 
@@ -384,12 +466,17 @@ def _method_selection_score(claim: RawClaim) -> float:
     score = _claim_score(claim)
     local_role = claim.structural_hints.local_role if claim.structural_hints is not None else None
     text = _clean_text(claim.statement).lower()
-    if classify_method_abstraction(claim) == "primitive":
+    abstraction = classify_method_abstraction(claim)
+    if abstraction == "primitive":
         score += 1.5
+    if abstraction == "system_realization":
+        score += 1.0
     if local_role == ClaimLocalRole.top_level:
         score += 2.0
     if _has_runtime_scope(text):
         score += 1.2
+    if _is_explicit_system_realization(text):
+        score += 2.5
     if _is_local_mechanism_dominated(text):
         score -= 2.0
     if local_role == ClaimLocalRole.implementation_detail:
@@ -622,5 +709,6 @@ __all__ = [
     "compress_claims_to_skeleton",
     "deduplicate_claims",
     "hybrid_dedup_promoted",
+    "select_context_for_one_liner",
     "select_result_for_one_liner",
 ]

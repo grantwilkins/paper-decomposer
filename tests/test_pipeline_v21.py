@@ -83,6 +83,30 @@ def test_attach_support_details_enforces_anchor_legality_and_allows_no_anchor() 
     assert attached[1].candidate_anchor_ids == []
 
 
+def test_attach_support_details_routes_problem_numeric_support_to_context() -> None:
+    claims = [
+        _claim("C1", ClaimType.context, "KV cache fragmentation limits batch size and throughput.", "1"),
+        _claim("M1", ClaimType.method, "PagedAttention is an attention algorithm that pages KV blocks.", "4.1"),
+        _claim("R1", ClaimType.result, "vLLM reaches 2-4x higher throughput than Orca at the same latency.", "5.2"),
+    ]
+    support = SupportDetail(
+        support_detail_id="SD_problem",
+        detail_type=SupportDetailType.numeric_support,
+        text="Existing LLM serving systems waste KV-cache memory through fragmentation and duplication, limiting feasible batch size.",
+        source_section="1 Introduction",
+        anchor_claim_id="R1",
+        candidate_anchor_ids=["R1"],
+        relationship_type=SupportRelationshipType.measures,
+        confidence=0.4,
+        evidence_ids=[],
+    )
+
+    attached = _attach_support_details([support], claims)
+
+    assert attached[0].anchor_claim_id == "C1"
+    assert attached[0].candidate_anchor_ids == ["C1"]
+
+
 def test_scorecard_reports_new_ontology_stability_metrics() -> None:
     promoted = [
         _claim("C1", ClaimType.context, "Fragmentation limits batch size.", "1"),

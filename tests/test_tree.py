@@ -87,3 +87,27 @@ def test_assemble_tree_deterministic_one_liner_prefers_broad_headline_result() -
 
     assert output.one_liner.achieved == "vLLM reaches 2-4x higher throughput than Orca at the same latency."
     assert output.one_liner.via == "vLLM is a serving runtime built around PagedAttention."
+
+
+def test_assemble_tree_deterministic_one_liner_prefers_problem_root_for_because() -> None:
+    metadata = PaperMetadata(title="PagedAttention", authors=[])
+    claims = [
+        _claim("C1", ClaimType.context, "Complex decoding algorithms create heterogeneous KV-cache sharing opportunities.", "4.4"),
+        _claim(
+            "C2",
+            ClaimType.context,
+            "Existing LLM serving systems waste KV-cache memory through fragmentation and duplication, limiting batch size and throughput.",
+            "1 Intro",
+        ),
+        _claim("M1", ClaimType.method, "PagedAttention is an attention algorithm that pages KV blocks.", "4.1"),
+        _claim("M2", ClaimType.method, "vLLM is a serving runtime built around PagedAttention.", "4.2"),
+        _claim("R1", ClaimType.result, "vLLM reaches 2-4x higher throughput than Orca at the same latency.", "5.2"),
+    ]
+
+    output = asyncio.run(
+        assemble_tree_deterministic(metadata=metadata, claims=claims, faceted=[], negatives=[], artifacts=[], config={})
+    )
+
+    assert output.one_liner.because == (
+        "Existing LLM serving systems waste KV-cache memory through fragmentation and duplication, limiting batch size and throughput."
+    )

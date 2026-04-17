@@ -15,7 +15,7 @@ Plausible wrong implementations:
 from __future__ import annotations
 
 from paper_decomposer.prompts.dedup import classify_method_abstraction, classify_result_family, compress_claims_to_skeleton, select_result_for_one_liner
-from paper_decomposer.schema import ClaimType, RawClaim
+from paper_decomposer.schema import ClaimLocalRole, ClaimStructuralHints, ClaimType, RawClaim
 
 
 def _claim(claim_id: str, claim_type: ClaimType, statement: str, source_section: str) -> RawClaim:
@@ -102,3 +102,94 @@ def test_classify_method_abstraction_requires_runtime_level_system_scope() -> No
 
     assert classify_method_abstraction(runtime_claim) == "system_realization"
     assert classify_method_abstraction(block_mapping_claim) == "submechanism"
+
+
+def test_compression_prefers_problem_root_over_scoped_decoding_observation() -> None:
+    claims = [
+        _claim(
+            "c_problem",
+            ClaimType.context,
+            "Existing LLM serving systems waste KV-cache memory through fragmentation and duplication, limiting batch size and throughput.",
+            "1 Introduction",
+        ),
+        _claim(
+            "c_scoped",
+            ClaimType.context,
+            "Complex decoding algorithms create heterogeneous KV-cache sharing opportunities across prompt sharing and beam search.",
+            "4.4",
+        ),
+        _claim("m1", ClaimType.method, "PagedAttention is an attention algorithm that pages KV blocks.", "4.1"),
+    ]
+
+    result = compress_claims_to_skeleton(claims, {"pipeline": {"dedup": {"context_cap": 1}}})
+    promoted_contexts = [claim for claim in result.promoted_claims if claim.claim_type == ClaimType.context]
+
+    assert [claim.claim_id for claim in promoted_contexts] == ["C1"]
+    assert promoted_contexts[0].statement == (
+        "Existing LLM serving systems waste KV-cache memory through fragmentation and duplication, limiting batch size and throughput."
+    )
+
+
+def test_select_result_for_one_liner_prefers_broader_headline_over_specific_benchmark() -> None:
+    results = [
+        _claim(
+            "r_benchmark",
+            ClaimType.result,
+            "vLLM can sustain 2x higher request rates than the three Orca baselines on ShareGPT with 1024-token prompts.",
+            "5.4",
+        ),
+        _claim(
+            "r_broad",
+            ClaimType.result,
+            "vLLM delivers 2-4x higher throughput than state-of-the-art systems at comparable latency, with larger gains on longer sequences and larger models.",
+            "abstract",
+        ),
+    ]
+
+    assert select_result_for_one_liner(results).claim_id == "r_broad"
+
+
+def test_compression_rejects_method_restatement_assumptions() -> None:
+    claims = [
+        _claim("c1", ClaimType.context, "KV cache fragmentation limits batch size.", "1 Intro"),
+        _claim("m1", ClaimType.method, "PagedAttention is an attention algorithm that pages KV blocks.", "4.1"),
+        _claim(
+            "a_bad",
+            ClaimType.assumption,
+            "The approach assumes that KV-cache memory can be managed using virtual-memory-style paging.",
+            "abstract",
+        ),
+        _claim(
+            "a_good",
+            ClaimType.assumption,
+            "Benefits depend on concurrent requests and available GPU memory.",
+            "6 Discussion",
+        ),
+    ]
+
+    result = compress_claims_to_skeleton(claims)
+
+    assert [claim.statement for claim in result.promoted_claims if claim.claim_type == ClaimType.assumption] == [
+        "Benefits depend on concurrent requests and available GPU memory."
+    ]
+
+
+def test_compression_keeps_runtime_system_realization_when_present() -> None:
+    claims = [
+        _claim("c1", ClaimType.context, "KV cache fragmentation limits batch size.", "1 Intro"),
+        _claim("m1", ClaimType.method, "PagedAttention is an attention algorithm that pages KV blocks.", "4.1"),
+        RawClaim(
+            claim_id="m2",
+            claim_type=ClaimType.method,
+            statement="vLLM is a serving engine with a centralized scheduler and a KV cache manager shared by GPU workers.",
+            source_section="4.0",
+            structural_hints=ClaimStructuralHints(local_role=ClaimLocalRole.implementation_detail),
+        ),
+        _claim("m3", ClaimType.method, "vLLM maps logical KV blocks to physical KV blocks via a block table.", "4.3"),
+    ]
+
+    result = compress_claims_to_skeleton(claims)
+    methods = [claim for claim in result.promoted_claims if claim.claim_type == ClaimType.method]
+
+    assert {classify_method_abstraction(claim) for claim in methods} == {"primitive", "system_realization"}
+    assert any("serving engine" in claim.statement for claim in methods)

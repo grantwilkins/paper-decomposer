@@ -60,6 +60,20 @@ _STOPWORDS = {
     "to",
     "with",
 }
+_PROBLEM_SUPPORT_RE = re.compile(
+    r"\b(waste|fragmentation|duplicate|duplication|redundant|batch size|bottleneck|"
+    r"limits?|limiting|memory challenge|memory waste|cache memory)\b",
+    re.IGNORECASE,
+)
+_RESULT_SUPPORT_RE = re.compile(
+    r"\b(throughput|latency|benchmark|baseline|dataset|accuracy|request rates?|"
+    r"requests concurrently|speedup|improv)\b",
+    re.IGNORECASE,
+)
+_SYSTEM_SUPPORT_RE = re.compile(
+    r"\b(vllm|runtime|serving|server|engine|scheduler|gpu workers|distributed execution|kv cache manager)\b",
+    re.IGNORECASE,
+)
 
 
 def _clean_text(text: str) -> str:
@@ -186,8 +200,23 @@ def _claim_to_support_detail(claim: RawClaim, index: int) -> SupportDetail:
     )
 
 
-def _is_legal_anchor(detail: SupportDetail, claim: RawClaim) -> bool:
+def _support_semantic_bucket(detail: SupportDetail) -> str:
+    text = _clean_text(detail.text).lower()
+    source = _clean_text(detail.source_section).lower()
     if detail.detail_type == SupportDetailType.numeric_support:
+        if _PROBLEM_SUPPORT_RE.search(text) and ("abstract" in source or "intro" in source or "challenge" in source or "related work" in source or not _RESULT_SUPPORT_RE.search(text)):
+            return "problem_support"
+        return "result_support"
+    if detail.detail_type == SupportDetailType.framework_dependency and ("related work" in source or _PROBLEM_SUPPORT_RE.search(text)):
+        return "problem_support"
+    return "method_support"
+
+
+def _is_legal_anchor(detail: SupportDetail, claim: RawClaim) -> bool:
+    bucket = _support_semantic_bucket(detail)
+    if bucket == "problem_support":
+        return claim.claim_type == ClaimType.context
+    if bucket == "result_support":
         return claim.claim_type == ClaimType.result
     if detail.detail_type in {
         SupportDetailType.implementation_fact,
@@ -202,9 +231,13 @@ def _is_legal_anchor(detail: SupportDetail, claim: RawClaim) -> bool:
 
 def _anchor_preference(detail: SupportDetail, claim: RawClaim) -> float:
     bonus = 0.0
+    detail_text = _clean_text(detail.text).lower()
     if detail.detail_type in {SupportDetailType.api_surface, SupportDetailType.framework_dependency}:
         if classify_method_abstraction(claim) == "system_realization":
             bonus += 0.15
+    if _support_semantic_bucket(detail) == "method_support" and _SYSTEM_SUPPORT_RE.search(detail_text):
+        if classify_method_abstraction(claim) == "system_realization":
+            bonus += 0.2
     return bonus
 
 
