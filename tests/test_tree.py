@@ -69,3 +69,21 @@ def test_assemble_tree_deterministic_builds_primitive_system_hierarchy() -> None
     assert next(child for child in system.children if child.claim_id == "R1").result_subtype is not None
     assert len(labels) == len(set(labels))
     assert not hasattr(output, "negative_claims")
+
+
+def test_assemble_tree_deterministic_one_liner_prefers_broad_headline_result() -> None:
+    metadata = PaperMetadata(title="PagedAttention", authors=[])
+    claims = [
+        _claim("C1", ClaimType.context, "Fragmentation limits batch size.", "1 Intro"),
+        _claim("M1", ClaimType.method, "PagedAttention is an attention algorithm that pages KV blocks.", "4.1"),
+        _claim("M2", ClaimType.method, "vLLM is a serving runtime built around PagedAttention.", "4.2"),
+        _claim("R1", ClaimType.result, "Beam search throughput improves over Orca by 2.3x.", "5.4"),
+        _claim("R2", ClaimType.result, "vLLM reaches 2-4x higher throughput than Orca at the same latency.", "5.2"),
+    ]
+
+    output = asyncio.run(
+        assemble_tree_deterministic(metadata=metadata, claims=claims, faceted=[], negatives=[], artifacts=[], config={})
+    )
+
+    assert output.one_liner.achieved == "vLLM reaches 2-4x higher throughput than Orca at the same latency."
+    assert output.one_liner.via == "vLLM is a serving runtime built around PagedAttention."

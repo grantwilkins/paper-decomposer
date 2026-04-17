@@ -44,6 +44,45 @@ def test_attach_support_details_remaps_to_best_claim() -> None:
     assert attached[0].confidence >= 0.2
 
 
+def test_attach_support_details_enforces_anchor_legality_and_allows_no_anchor() -> None:
+    claims = [
+        _claim("M1", ClaimType.method, "PagedAttention is an attention algorithm that pages KV blocks.", "4.1"),
+        _claim("M2", ClaimType.method, "vLLM is a serving runtime built around PagedAttention.", "4.2"),
+        _claim("R1", ClaimType.result, "vLLM reaches 2-4x higher throughput than Orca at the same latency.", "5.2"),
+    ]
+    support = [
+        SupportDetail(
+            support_detail_id="SD_num",
+            detail_type=SupportDetailType.numeric_support,
+            text="vLLM reaches 2-4x higher throughput than Orca at the same latency.",
+            source_section="5.2",
+            anchor_claim_id="M2",
+            candidate_anchor_ids=["M2"],
+            relationship_type=SupportRelationshipType.measures,
+            confidence=0.3,
+            evidence_ids=[],
+        ),
+        SupportDetail(
+            support_detail_id="SD_none",
+            detail_type=SupportDetailType.numeric_support,
+            text="The Alpaca trace contains long requests.",
+            source_section="5.1",
+            anchor_claim_id="M1",
+            candidate_anchor_ids=["M1"],
+            relationship_type=SupportRelationshipType.measures,
+            confidence=0.3,
+            evidence_ids=[],
+        ),
+    ]
+
+    attached = _attach_support_details(support, claims)
+
+    assert attached[0].anchor_claim_id == "R1"
+    assert attached[0].candidate_anchor_ids == ["R1"]
+    assert attached[1].anchor_claim_id is None
+    assert attached[1].candidate_anchor_ids == []
+
+
 def test_scorecard_reports_new_ontology_stability_metrics() -> None:
     promoted = [
         _claim("C1", ClaimType.context, "Fragmentation limits batch size.", "1"),

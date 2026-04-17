@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import re
 from typing import Any, cast
 
-from ..schema import ClaimGroup, ClaimType, DedupOutput, ModelTier, RawClaim
+from ..schema import ClaimGroup, ClaimLocalRole, ClaimType, DedupOutput, ModelTier, RawClaim
 
 _VALID_TIERS: set[ModelTier] = {"small", "medium", "heavy"}
 _TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
@@ -47,8 +47,24 @@ _SYSTEM_HINT_RE = re.compile(
     r"\b(vllm|serving system|runtime|server|framework|distributed execution|system overview)\b",
     re.IGNORECASE,
 )
+_RUNTIME_ROLE_RE = re.compile(
+    r"\b(runtime|serving|server|engine|framework|system|request|across requests|"
+    r"reduce fragmentation|support sharing|virtualiz|manage kv cache)\b",
+    re.IGNORECASE,
+)
 _SUBMECHANISM_HINT_RE = re.compile(
     r"\b(kernel|scheduler|allocator|cache manager|block table|eviction|preemption|copy-on-write|warp|cuda)\b",
+    re.IGNORECASE,
+)
+_LOCAL_MECHANISM_NOUN_RE = re.compile(
+    r"\b(block table|logical block|physical block|kv block|allocator|scheduler|"
+    r"cache manager|kernel|copy-on-write|dispatch)\b",
+    re.IGNORECASE,
+)
+_LOCAL_MECHANISM_VERB_RE = re.compile(
+    r"\b(allocat(?:e|es|ed|ing)|map(?:s|ped|ping)?|cop(?:y|ies|ied|ying)|"
+    r"schedul(?:e|es|ed|ing)|dispatch(?:es|ed|ing)?|append(?:s|ed|ing)?|"
+    r"update(?:s|d|ing)?|store(?:s|d|ing)?|free(?:s|d|ing)?)\b",
     re.IGNORECASE,
 )
 _HEADLINE_RESULT_RE = re.compile(
@@ -61,6 +77,15 @@ _MEMORY_RESULT_RE = re.compile(
 )
 _DECODING_RESULT_RE = re.compile(r"\b(beam|sampling|prefix|decoding|prompt sharing)\b", re.IGNORECASE)
 _CONSTRAINT_RESULT_RE = re.compile(r"\b(overhead|penalty|constraint|cost|latency increase|oom|out of memory)\b", re.IGNORECASE)
+_BASELINE_COMPARISON_RE = re.compile(
+    r"\b(than|versus|vs\.?|outperform|compared with|compared to|over)\b",
+    re.IGNORECASE,
+)
+_MATCHED_LATENCY_RE = re.compile(r"\b(same latency|identical latency|latency constraint|slo)\b", re.IGNORECASE)
+_AGGREGATE_PERFORMANCE_RE = re.compile(
+    r"\b(throughput|request rate|request rates|requests concurrently|concurren|batch size)\b",
+    re.IGNORECASE,
+)
 _LABEL_BLOCKLIST = {
     "paper",
     "system",
@@ -213,17 +238,38 @@ def _canonical_label_seed(claim: RawClaim) -> str:
     return "_".join(tokens[:5]) or f"{claim.claim_type.value}_claim"
 
 
+def _has_runtime_role(text: str) -> bool:
+    return bool(_SYSTEM_HINT_RE.search(text) or _RUNTIME_ROLE_RE.search(text))
+
+
+def _has_runtime_scope(text: str) -> bool:
+    return bool(_RUNTIME_ROLE_RE.search(text))
+
+
+def _is_local_mechanism_dominated(text: str) -> bool:
+    verb_hits = len(_LOCAL_MECHANISM_VERB_RE.findall(text))
+    return verb_hits >= 2 and bool(_LOCAL_MECHANISM_NOUN_RE.search(text))
+
+
 def classify_method_abstraction(claim: RawClaim) -> str:
     text = _clean_text(claim.statement).lower()
-    if _SUBMECHANISM_HINT_RE.search(text):
-        return "submechanism"
+    local_role = claim.structural_hints.local_role if claim.structural_hints is not None else None
     primitive_hits = len(_PRIMITIVE_HINT_RE.findall(text))
     system_hits = len(_SYSTEM_HINT_RE.findall(text))
+    has_runtime_role = _has_runtime_role(text)
+    has_runtime_scope = _has_runtime_scope(text)
+    local_mechanism = bool(_SUBMECHANISM_HINT_RE.search(text) or _is_local_mechanism_dominated(text))
+    if primitive_hits and primitive_hits >= system_hits and not has_runtime_role:
+        return "primitive"
+    if local_mechanism:
+        if has_runtime_scope and local_role != ClaimLocalRole.implementation_detail:
+            return "system_realization"
+        return "submechanism"
     if primitive_hits and primitive_hits >= system_hits:
         return "primitive"
-    if system_hits:
+    if has_runtime_role and local_role != ClaimLocalRole.implementation_detail:
         return "system_realization"
-    if _METHOD_VERB_RE.search(text):
+    if _METHOD_VERB_RE.search(text) and local_role == ClaimLocalRole.top_level and has_runtime_role:
         return "system_realization"
     return "submechanism"
 
@@ -239,6 +285,41 @@ def classify_result_family(claim: RawClaim) -> str:
     if _HEADLINE_RESULT_RE.search(text):
         return "headline_comparative_performance"
     return "headline_comparative_performance"
+
+
+def _result_tree_family_priority(family: str) -> int:
+    priorities = {
+        "headline_comparative_performance": 0,
+        "memory_mechanism_validation": 1,
+        "decoding_mode_improvement": 2,
+        "constraint_observation": 3,
+    }
+    return priorities.get(family, 4)
+
+
+def _result_summary_priority(claim: RawClaim) -> tuple[int, float]:
+    text = _clean_text(claim.statement).lower()
+    family = classify_result_family(claim)
+    if family == "headline_comparative_performance":
+        if _BASELINE_COMPARISON_RE.search(text) and _MATCHED_LATENCY_RE.search(text):
+            return (0, -_claim_score(claim))
+        if _AGGREGATE_PERFORMANCE_RE.search(text):
+            return (1, -_claim_score(claim))
+        return (2, -_claim_score(claim))
+    if family == "memory_mechanism_validation":
+        return (3, -_claim_score(claim))
+    if family == "decoding_mode_improvement":
+        return (4, -_claim_score(claim))
+    if family == "constraint_observation":
+        return (5, -_claim_score(claim))
+    return (6, -_claim_score(claim))
+
+
+def select_result_for_one_liner(claims: list[RawClaim]) -> RawClaim | None:
+    results = [claim for claim in claims if claim.claim_type == ClaimType.result]
+    if not results:
+        return None
+    return min(results, key=_result_summary_priority)
 
 
 def _concept_family(claim: RawClaim) -> str:
@@ -299,11 +380,28 @@ def _choose_contexts(claims: list[RawClaim], cap: int) -> tuple[list[RawClaim], 
     return ranked[:cap], ranked[cap:]
 
 
+def _method_selection_score(claim: RawClaim) -> float:
+    score = _claim_score(claim)
+    local_role = claim.structural_hints.local_role if claim.structural_hints is not None else None
+    text = _clean_text(claim.statement).lower()
+    if classify_method_abstraction(claim) == "primitive":
+        score += 1.5
+    if local_role == ClaimLocalRole.top_level:
+        score += 2.0
+    if _has_runtime_scope(text):
+        score += 1.2
+    if _is_local_mechanism_dominated(text):
+        score -= 2.0
+    if local_role == ClaimLocalRole.implementation_detail:
+        score -= 3.0
+    return score
+
+
 def _choose_methods(claims: list[RawClaim], cap: int) -> tuple[list[RawClaim], list[RawClaim], int]:
     if not claims or cap <= 0:
         return [], list(claims), 0
 
-    ranked = sorted(claims, key=_claim_score, reverse=True)
+    ranked = sorted(claims, key=_method_selection_score, reverse=True)
     promoted: list[RawClaim] = []
     residual: list[RawClaim] = []
     seen_pairs: set[tuple[str, str]] = set()
@@ -338,10 +436,10 @@ def _choose_methods(claims: list[RawClaim], cap: int) -> tuple[list[RawClaim], l
         promoted.append(claim)
 
     if not promoted and ranked:
-        promoted = [max(ranked, key=_claim_score)]
+        promoted = [max(ranked, key=_method_selection_score)]
         residual = [claim for claim in ranked if claim.claim_id != promoted[0].claim_id]
 
-    promoted.sort(key=lambda claim: (classify_method_abstraction(claim) != "primitive", -_claim_score(claim)))
+    promoted.sort(key=lambda claim: (classify_method_abstraction(claim) != "primitive", -_method_selection_score(claim)))
     return promoted[:cap], residual + promoted[cap:], concept_collisions
 
 
@@ -359,7 +457,7 @@ def _choose_results(claims: list[RawClaim], cap: int) -> tuple[list[RawClaim], l
         collisions += 1
         residual.append(claim)
     promoted = list(by_family.values())
-    promoted.sort(key=_claim_score, reverse=True)
+    promoted.sort(key=lambda claim: (_result_tree_family_priority(classify_result_family(claim)), -_claim_score(claim)))
     residual.extend(promoted[cap:])
     return promoted[:cap], residual, collisions
 
@@ -524,4 +622,5 @@ __all__ = [
     "compress_claims_to_skeleton",
     "deduplicate_claims",
     "hybrid_dedup_promoted",
+    "select_result_for_one_liner",
 ]

@@ -45,6 +45,9 @@ Granularity discipline (strict):
   the text lists lifecycle verbs (allocate/fetch/store/schedule/update).
 - Fold helper operations and decode-loop step lists into the nearest
   parent mechanism unless the paper argues them as distinct contributions.
+- Internal block management, block-table mapping, copy-on-write plumbing,
+  scheduler loops, and kernel dispatch details should stay as support detail
+  unless the paper clearly presents them as the runtime-level core realization.
 - Merge near-duplicate restatements in the same section.
 
 For each claim:
@@ -195,7 +198,7 @@ _MECHANISM_CUE_RE = re.compile(
     re.IGNORECASE,
 )
 _ASSUMPTION_CUE_RE = re.compile(
-    r"(assum|require|depends on|holds when|only when|in practice)",
+    r"(assum|require|depend(?:s)? on|holds when|only when|in practice)",
     re.IGNORECASE,
 )
 _CONTEXT_CUE_RE = re.compile(
@@ -213,7 +216,11 @@ _NEGATIVE_CUE_RE = re.compile(
     re.IGNORECASE,
 )
 _ASSUMPTION_CONDITIONAL_RE = re.compile(
-    r"\b(if|when|unless|requires?|depends on|under\b|subject to|only when)\b",
+    r"\b(if|when|unless|requires?|depend(?:s)? on|subject to|only when)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_ASSUMPTION_RE = re.compile(
+    r"\b(we assume|assume(?:s|d|ing)?|requires?|depend(?:s)? on|subject to|only when|holds when)\b",
     re.IGNORECASE,
 )
 _FUTURE_WORK_RE = re.compile(
@@ -612,7 +619,7 @@ def _infer_local_role(claim_type: ClaimType, statement: str) -> ClaimLocalRole:
     if claim_type == ClaimType.method:
         if _HIGH_LEVEL_METHOD_RE.search(lowered):
             return ClaimLocalRole.top_level
-        if re.search(r"\b(kernel|allocator|lookup|metadata|scheduler|buffer|table|cache manager)\b", lowered):
+        if re.search(r"\b(kernel|allocator|lookup|metadata|scheduler|buffer|table|cache manager|logical block|physical block)\b", lowered):
             return ClaimLocalRole.implementation_detail
         if _MECHANISM_CUE_RE.search(lowered):
             return ClaimLocalRole.mechanism
@@ -806,7 +813,7 @@ def _is_real_assumption_claim(claim: RawClaim) -> bool:
         return False
     if _FUTURE_WORK_RE.search(lowered):
         return False
-    return bool(_ASSUMPTION_CONDITIONAL_RE.search(lowered))
+    return bool(_ASSUMPTION_CONDITIONAL_RE.search(lowered) or _EXPLICIT_ASSUMPTION_RE.search(lowered))
 
 
 def _is_real_negative_claim(claim: RawClaim) -> bool:
@@ -1028,7 +1035,7 @@ def _to_section_argument_candidate(claim: RawClaim) -> SectionArgumentCandidate:
     )
 
 
-def _infer_support_detail_type(claim: RawClaim, section: Section) -> SupportDetailType:
+def classify_support_detail_type(claim: RawClaim, section: Section | None = None) -> SupportDetailType:
     lowered = claim.statement.lower()
     if _API_SURFACE_RE.search(lowered):
         return SupportDetailType.api_surface
@@ -1040,12 +1047,12 @@ def _infer_support_detail_type(claim: RawClaim, section: Section) -> SupportDeta
         return SupportDetailType.procedural_step
     if _has_evaluation_finding_signal(claim):
         return SupportDetailType.numeric_support
-    if _is_implementation_section(section) or claim.claim_type == ClaimType.method:
+    if (section is not None and _is_implementation_section(section)) or claim.claim_type == ClaimType.method:
         return SupportDetailType.implementation_fact
     return SupportDetailType.numeric_support
 
 
-def _relationship_for_support_type(detail_type: SupportDetailType) -> SupportRelationshipType:
+def support_relationship_for_type(detail_type: SupportDetailType) -> SupportRelationshipType:
     mapping = {
         SupportDetailType.implementation_fact: SupportRelationshipType.implements,
         SupportDetailType.procedural_step: SupportRelationshipType.operational_context,
@@ -1064,7 +1071,7 @@ def _support_confidence(claim: RawClaim) -> float:
 
 
 def _claim_to_support_detail(claim: RawClaim, section: Section, index: int) -> SupportDetail:
-    detail_type = _infer_support_detail_type(claim, section)
+    detail_type = classify_support_detail_type(claim, section)
     hints = claim.structural_hints
     anchor_id = hints.elaborates_seed_id if hints is not None else None
     candidate_anchor_ids = [anchor_id] if anchor_id else []
@@ -1075,7 +1082,7 @@ def _claim_to_support_detail(claim: RawClaim, section: Section, index: int) -> S
         source_section=claim.source_section,
         anchor_claim_id=anchor_id,
         candidate_anchor_ids=candidate_anchor_ids,
-        relationship_type=_relationship_for_support_type(detail_type),
+        relationship_type=support_relationship_for_type(detail_type),
         confidence=_support_confidence(claim),
         evidence_ids=[pointer.artifact_id for pointer in claim.evidence if pointer.artifact_id.strip()],
     )
@@ -1085,7 +1092,7 @@ def _should_route_to_support_detail(claim: RawClaim, section: Section) -> bool:
     if _matches_hard_suppression_pattern(claim):
         return True
 
-    detail_type = _infer_support_detail_type(claim, section)
+    detail_type = classify_support_detail_type(claim, section)
     if detail_type in {
         SupportDetailType.api_surface,
         SupportDetailType.framework_dependency,
@@ -1213,6 +1220,8 @@ __all__ = [
     "UNKNOWN_SECTION_INSTRUCTIONS",
     "get_instructions_for_role",
     "build_section_prompt",
+    "classify_support_detail_type",
     "extract_section_digest",
     "extract_section_claims",
+    "support_relationship_for_type",
 ]

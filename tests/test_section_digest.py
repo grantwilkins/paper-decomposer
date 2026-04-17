@@ -38,6 +38,11 @@ def test_extract_section_digest_routes_obvious_residue_to_support(monkeypatch: p
         _method_claim("m_api", "The frontend exposes an OpenAI-compatible API interface."),
         _method_claim("m_fw", "The runtime uses NCCL, FastAPI, and PyTorch."),
         _method_claim("m_proc", "For each decode step, the runtime selects requests, allocates blocks, updates tables, and stores outputs."),
+        _method_claim(
+            "m_blocks",
+            "vLLM maps logical KV blocks to physical KV blocks via a block table in GPU workers.",
+            role="implementation_detail",
+        ),
         _method_claim("m_kernel", "A fused CUDA kernel gathers discontinuous blocks with coalesced reads.", role="implementation_detail"),
         _method_claim("m_core", "PagedAttention reduces fragmentation through paged KV allocation."),
         RawClaim(claim_id="c1", claim_type=ClaimType.context, statement="Fragmentation limits batch size.", source_section="1 Intro"),
@@ -58,6 +63,7 @@ def test_extract_section_digest_routes_obvious_residue_to_support(monkeypatch: p
     assert support_types == {
         SupportDetailType.api_surface,
         SupportDetailType.framework_dependency,
+        SupportDetailType.implementation_fact,
         SupportDetailType.procedural_step,
         SupportDetailType.local_kernel_optimization,
     }

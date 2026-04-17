@@ -17,7 +17,7 @@ from ..schema import (
     SemanticRole,
     SupportDetail,
 )
-from .dedup import classify_method_abstraction, classify_result_family
+from .dedup import classify_method_abstraction, classify_result_family, select_result_for_one_liner
 
 TREE_SYSTEM_PROMPT = """Assemble a deterministic claim tree from a stable promoted argument set."""
 _TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
@@ -124,7 +124,7 @@ def _one_liner(claims: list[RawClaim]) -> OneLiner:
     methods = [claim for claim in claims if claim.claim_type == ClaimType.method]
     primitive = next((claim for claim in methods if classify_method_abstraction(claim) == "primitive"), None)
     system = next((claim for claim in methods if classify_method_abstraction(claim) == "system_realization"), None)
-    result = next((claim for claim in claims if claim.claim_type == ClaimType.result), None)
+    result = select_result_for_one_liner(claims)
     via_claim = system or primitive or (methods[0] if methods else None)
     fallback = claims[0].statement if claims else "UNSPECIFIED"
     return OneLiner(

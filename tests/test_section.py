@@ -653,6 +653,46 @@ def test_extract_section_claims_drops_nonconditional_assumption_claim(
     assert output.claims == []
 
 
+def test_extract_section_claims_keeps_only_explicitly_conditional_assumptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    section = Section(
+        section_number="6",
+        title="Discussion",
+        role=RhetoricalRole.discussion,
+        body_text="Discussion.",
+        char_count=11,
+    )
+
+    async def _fake_call_model(
+        tier: str,
+        messages: list[dict[str, str]],
+        response_schema: type | None = None,
+        config: dict | None = None,
+    ) -> FlatSectionOutput:
+        assert tier == "small"
+        assert response_schema is FlatSectionOutput
+        return FlatSectionOutput(
+            claims=[
+                FlatClaim(
+                    claim_id="a_valid",
+                    claim_type=ClaimType.assumption.value,
+                    statement="Benefits depend on concurrent requests and GPU memory capacity.",
+                ),
+                FlatClaim(
+                    claim_id="a_setup_only",
+                    claim_type=ClaimType.assumption.value,
+                    statement="On Alpaca and ShareGPT with parallel sampling and identical hardware, we evaluate throughput.",
+                ),
+            ]
+        )
+
+    monkeypatch.setattr(section_prompts, "call_model", _fake_call_model)
+    output = asyncio.run(extract_section_claims(section, [], [], {"pipeline": {"section_extraction": {}}}))
+
+    assert [claim.claim_id for claim in output.claims] == ["a_valid"]
+
+
 def test_extract_section_claims_drops_negative_without_explicit_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -18,7 +18,7 @@ from .prompts.dedup import (
     compress_claims_to_skeleton,
 )
 from .prompts.facets import extract_facets
-from .prompts.section import extract_section_digest
+from .prompts.section import classify_support_detail_type, extract_section_digest, support_relationship_for_type
 from .prompts.seed import extract_seed
 from .prompts.tree import assemble_tree_deterministic
 from .schema import (
@@ -27,6 +27,7 @@ from .schema import (
     ClaimType,
     FacetedClaim,
     PaperDecomposition,
+    PaperSkeletonCandidate,
     RawClaim,
     Section,
     SectionArgumentCandidate,
@@ -139,6 +140,16 @@ def _candidate_to_raw(candidate: SectionArgumentCandidate) -> RawClaim:
     )
 
 
+def _seed_skeleton(seed_claims: list[RawClaim]) -> PaperSkeletonCandidate:
+    return PaperSkeletonCandidate(
+        context_roots=[claim for claim in seed_claims if claim.claim_type == ClaimType.context],
+        core_methods=[claim for claim in seed_claims if claim.claim_type == ClaimType.method],
+        topline_results=[claim for claim in seed_claims if claim.claim_type == ClaimType.result],
+        assumptions=[claim for claim in seed_claims if claim.claim_type == ClaimType.assumption],
+        negatives=[claim for claim in seed_claims if claim.claim_type == ClaimType.negative],
+    )
+
+
 def _claim_similarity(left: RawClaim | SupportDetail, right: RawClaim) -> float:
     left_text = left.statement if isinstance(left, RawClaim) else left.text
     left_tokens = _tokens(left_text)
@@ -160,35 +171,8 @@ def _claim_similarity(left: RawClaim | SupportDetail, right: RawClaim) -> float:
     return min(score, 1.0)
 
 
-def _residual_detail_type(claim: RawClaim) -> SupportDetailType:
-    lowered = claim.statement.lower()
-    if claim.claim_type == ClaimType.result:
-        return SupportDetailType.numeric_support
-    if re.search(r"\b(api|endpoint|request|response|parameter)\b", lowered):
-        return SupportDetailType.api_surface
-    if re.search(r"\b(pytorch|torch|jax|tensorflow|fastapi|grpc|http|rest|nccl)\b", lowered):
-        return SupportDetailType.framework_dependency
-    if re.search(r"\b(for each|then |append|update|store|fetch|select requests)\b", lowered):
-        return SupportDetailType.procedural_step
-    if re.search(r"\b(kernel|warp|cuda|coalesced)\b", lowered):
-        return SupportDetailType.local_kernel_optimization
-    return SupportDetailType.implementation_fact
-
-
-def _residual_relationship(detail_type: SupportDetailType) -> SupportRelationshipType:
-    mapping = {
-        SupportDetailType.implementation_fact: SupportRelationshipType.implements,
-        SupportDetailType.procedural_step: SupportRelationshipType.operational_context,
-        SupportDetailType.api_surface: SupportRelationshipType.instantiates,
-        SupportDetailType.framework_dependency: SupportRelationshipType.uses_framework,
-        SupportDetailType.local_kernel_optimization: SupportRelationshipType.local_optimization_of,
-        SupportDetailType.numeric_support: SupportRelationshipType.measures,
-    }
-    return mapping[detail_type]
-
-
 def _claim_to_support_detail(claim: RawClaim, index: int) -> SupportDetail:
-    detail_type = _residual_detail_type(claim)
+    detail_type = classify_support_detail_type(claim)
     return SupportDetail(
         support_detail_id=f"SD_residual_{index}",
         detail_type=detail_type,
@@ -196,33 +180,59 @@ def _claim_to_support_detail(claim: RawClaim, index: int) -> SupportDetail:
         source_section=claim.source_section,
         anchor_claim_id=None,
         candidate_anchor_ids=[],
-        relationship_type=_residual_relationship(detail_type),
+        relationship_type=support_relationship_for_type(detail_type),
         confidence=min(1.0, max(0.2, (claim.claim_strength or 0.0) / 6.0 if claim.claim_strength is not None else 0.4)),
         evidence_ids=[pointer.artifact_id for pointer in claim.evidence if pointer.artifact_id.strip()],
     )
+
+
+def _is_legal_anchor(detail: SupportDetail, claim: RawClaim) -> bool:
+    if detail.detail_type == SupportDetailType.numeric_support:
+        return claim.claim_type == ClaimType.result
+    if detail.detail_type in {
+        SupportDetailType.implementation_fact,
+        SupportDetailType.procedural_step,
+        SupportDetailType.local_kernel_optimization,
+        SupportDetailType.api_surface,
+        SupportDetailType.framework_dependency,
+    }:
+        return claim.claim_type == ClaimType.method
+    return False
+
+
+def _anchor_preference(detail: SupportDetail, claim: RawClaim) -> float:
+    bonus = 0.0
+    if detail.detail_type in {SupportDetailType.api_surface, SupportDetailType.framework_dependency}:
+        if classify_method_abstraction(claim) == "system_realization":
+            bonus += 0.15
+    return bonus
 
 
 def _attach_support_details(support_details: list[SupportDetail], claims: list[RawClaim]) -> list[SupportDetail]:
     if not support_details or not claims:
         return list(support_details)
 
+    claim_by_id = {claim.claim_id: claim for claim in claims}
     remapped: list[SupportDetail] = []
     for detail in support_details:
-        if detail.anchor_claim_id and any(claim.claim_id == detail.anchor_claim_id for claim in claims):
+        current_anchor = claim_by_id.get(detail.anchor_claim_id) if detail.anchor_claim_id else None
+        if current_anchor is not None and _is_legal_anchor(detail, current_anchor):
             remapped.append(detail)
             continue
+        legal_claims = [claim for claim in claims if _is_legal_anchor(detail, claim)]
+        if not legal_claims:
+            remapped.append(detail.model_copy(update={"anchor_claim_id": None, "candidate_anchor_ids": []}))
+            continue
         scored = sorted(
-            ((claim, _claim_similarity(detail, claim)) for claim in claims),
-            key=lambda item: item[1],
+            ((claim, _claim_similarity(detail, claim) + _anchor_preference(detail, claim)) for claim in legal_claims),
+            key=lambda item: (item[1], _claim_similarity(detail, item[0])),
             reverse=True,
         )
         candidate_anchor_ids = [claim.claim_id for claim, score in scored[:3] if score >= 0.05]
-        if not candidate_anchor_ids and scored and scored[0][1] > 0.0:
-            candidate_anchor_ids = [scored[0][0].claim_id]
         anchor_claim_id = candidate_anchor_ids[0] if candidate_anchor_ids else None
         confidence = detail.confidence
-        if scored:
-            confidence = round(max(detail.confidence, min(1.0, scored[0][1])), 3)
+        if scored and anchor_claim_id is not None:
+            confidence = round(max(detail.confidence, min(1.0, _claim_similarity(detail, scored[0][0]))), 3)
         remapped.append(
             detail.model_copy(
                 update={
@@ -377,6 +387,7 @@ async def decompose_paper(pdf_path: str, config_path: str = "config.yaml") -> Pa
                 seed_candidates = list(seed_output.claims)
             except Exception as exc:
                 console.print(f"[yellow]Seed candidate extraction failed:[/yellow] {exc}")
+        seed_skeleton = _seed_skeleton(seed_candidates)
 
         section_inputs = [
             section
@@ -388,7 +399,7 @@ async def decompose_paper(pdf_path: str, config_path: str = "config.yaml") -> Pa
             section_artifacts = list(section.artifacts) if section.artifacts else list(document.all_artifacts)
             return await extract_section_digest(
                 section=section,
-                skeleton=type("EmptySkeleton", (), {"claims": lambda self: []})(),
+                skeleton=seed_skeleton,
                 artifacts=section_artifacts,
                 config=config,
             )

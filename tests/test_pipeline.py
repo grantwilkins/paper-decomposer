@@ -126,7 +126,13 @@ def test_decompose_paper_uses_bounded_semantic_backbone(monkeypatch: pytest.Monk
             SectionArgumentCandidate(
                 claim_id="cand_res",
                 claim_type=ClaimType.result,
-                statement="vLLM reaches 2-4x higher throughput than Orca.",
+                statement="vLLM reaches 2-4x higher throughput than Orca at the same latency.",
+                source_section="5 Eval",
+            ),
+            SectionArgumentCandidate(
+                claim_id="cand_narrow_res",
+                claim_type=ClaimType.result,
+                statement="vLLM achieves 53.13% average memory saving under parallel sampling on Alpaca.",
                 source_section="5 Eval",
             ),
             SectionArgumentCandidate(
@@ -166,7 +172,8 @@ def test_decompose_paper_uses_bounded_semantic_backbone(monkeypatch: pytest.Monk
         return seed_output
 
     async def _fake_section(*args, **kwargs):
-        _ = (args, kwargs)
+        skeleton = kwargs["skeleton"]
+        assert skeleton.claims()
         return section_digest
 
     async def _fake_facets(claim: RawClaim, source, config):
@@ -203,5 +210,6 @@ def test_decompose_paper_uses_bounded_semantic_backbone(monkeypatch: pytest.Monk
     assert len(result.claim_tree) == 1
     assert len(method_nodes) <= 2
     assert any(detail.anchor_claim_id for detail in result.support_details)
+    assert result.one_liner.achieved == "vLLM reaches 2-4x higher throughput than Orca at the same latency."
     assert not hasattr(result, "negative_claims")
     assert any(path.name.startswith("PagedAttention") for path in tmp_path.iterdir())

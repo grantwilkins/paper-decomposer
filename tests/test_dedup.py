@@ -14,7 +14,7 @@ Plausible wrong implementations:
 
 from __future__ import annotations
 
-from paper_decomposer.prompts.dedup import classify_method_abstraction, classify_result_family, compress_claims_to_skeleton
+from paper_decomposer.prompts.dedup import classify_method_abstraction, classify_result_family, compress_claims_to_skeleton, select_result_for_one_liner
 from paper_decomposer.schema import ClaimType, RawClaim
 
 
@@ -68,3 +68,37 @@ def test_compression_rejects_mechanism_like_assumptions_and_compacts_results_by_
         "constraint_observation",
         "decoding_mode_improvement",
     }
+
+
+def test_compression_keeps_headline_result_family_under_tight_cap() -> None:
+    claims = [
+        _claim("c1", ClaimType.context, "KV cache fragmentation limits batch size.", "1 Intro"),
+        _claim("m1", ClaimType.method, "PagedAttention is an attention algorithm that pages KV blocks.", "4.1"),
+        _claim("r1", ClaimType.result, "vLLM reaches 2-4x higher throughput than Orca at the same latency.", "5.2"),
+        _claim("r2", ClaimType.result, "vLLM achieves 53.13% average memory saving under parallel sampling on Alpaca.", "5.4"),
+    ]
+
+    result = compress_claims_to_skeleton(claims, {"pipeline": {"dedup": {"result_family_cap": 1}}})
+    promoted_results = [claim for claim in result.promoted_claims if claim.claim_type == ClaimType.result]
+
+    assert len(promoted_results) == 1
+    assert promoted_results[0].statement == "vLLM reaches 2-4x higher throughput than Orca at the same latency."
+    assert select_result_for_one_liner(promoted_results).statement == promoted_results[0].statement
+
+
+def test_classify_method_abstraction_requires_runtime_level_system_scope() -> None:
+    runtime_claim = _claim(
+        "m_runtime",
+        ClaimType.method,
+        "vLLM is a serving runtime that manages KV cache allocation and sharing across requests.",
+        "4.2",
+    )
+    block_mapping_claim = _claim(
+        "m_blocks",
+        ClaimType.method,
+        "vLLM maps logical KV blocks to physical KV blocks via a block table in GPU workers.",
+        "4.3",
+    )
+
+    assert classify_method_abstraction(runtime_claim) == "system_realization"
+    assert classify_method_abstraction(block_mapping_claim) == "submechanism"
