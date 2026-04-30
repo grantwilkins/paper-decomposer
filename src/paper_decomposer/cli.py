@@ -10,7 +10,7 @@ from rich.table import Table
 import yaml
 
 from .pdf_parser import parse_pdf
-from .pipeline import decompose_paper
+from .pipeline import ingest_paper
 
 console = Console()
 
@@ -26,11 +26,11 @@ def _load_pdf_config(config_path: str) -> dict:
     return raw
 
 
-def _print_dry_run_summary(pdf_path: Path, config_path: str) -> None:
+def _print_section_summary(pdf_path: Path, config_path: str) -> None:
     config = _load_pdf_config(config_path)
     document = parse_pdf(str(pdf_path), config)
 
-    console.print(f"[bold]Dry run:[/bold] {pdf_path}")
+    console.print(f"[bold]{pdf_path}[/bold]")
     console.print(
         f"Title: {document.metadata.title}\n"
         f"Sections: {len(document.sections)} | Artifacts: {len(document.all_artifacts)}"
@@ -55,14 +55,13 @@ def _print_dry_run_summary(pdf_path: Path, config_path: str) -> None:
 
 def _run_single(pdf_path: Path, config_path: str, dry_run: bool) -> None:
     if dry_run:
-        _print_dry_run_summary(pdf_path, config_path)
+        _print_section_summary(pdf_path, config_path)
         return
 
-    result = asyncio.run(decompose_paper(str(pdf_path), config_path))
+    document = asyncio.run(ingest_paper(str(pdf_path), config_path))
     console.print(
-        f"[green]Done[/green] {pdf_path.name} | "
-        f"roots={len(result.claim_tree)} support_details={len(result.support_details)} "
-        f"cost=${result.extraction_cost_usd:.4f}"
+        f"[green]Parsed[/green] {pdf_path.name} | "
+        f"sections={len(document.sections)} artifacts={len(document.all_artifacts)}"
     )
 
 
@@ -76,7 +75,7 @@ def _run_batch(directory: Path, config_path: str, dry_run: bool) -> int:
     for pdf in pdfs:
         try:
             _run_single(pdf, config_path, dry_run)
-        except Exception as exc:  # pragma: no cover - behavior validated via integration execution
+        except Exception as exc:
             failures += 1
             console.print(f"[red]Failed[/red] {pdf.name}: {exc}")
 
@@ -89,7 +88,7 @@ def _run_batch(directory: Path, config_path: str, dry_run: bool) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Decompose ML papers into structured claim trees")
+    parser = argparse.ArgumentParser(description="Ingest ML papers into the methods/settings/outcomes/claims DAG")
     parser.add_argument("input", help="PDF file or directory containing PDFs")
     parser.add_argument("--config", default="config.yaml", help="Path to config YAML")
     parser.add_argument("--dry-run", action="store_true", help="Parse PDFs and print sections only")

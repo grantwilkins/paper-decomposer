@@ -27,9 +27,6 @@ from pydantic import BaseModel
 import paper_decomposer.models as model_client
 from paper_decomposer.schema import (
     AppSettings,
-    ClaimLocalRole,
-    FlatClaim as SchemaFlatClaim,
-    ParentPreference,
     PaperDecomposerConfig,
     RuntimeModelConfig,
     RuntimePipelineConfig,
@@ -145,11 +142,7 @@ def _app_settings_with_priced_raw_config() -> AppSettings:
                     "min_section_chars": 1,
                     "max_section_chars": 10,
                 },
-                "seed": {},
-                "section_extraction": {},
-                "dedup": {},
-                "tree": {},
-                "output": {},
+                "extraction": {},
             },
         }
     )
@@ -178,73 +171,6 @@ def _reset_cost_tracker() -> None:
     model_client.reset_cost_tracker()
     yield
     model_client.reset_cost_tracker()
-
-
-def test_flat_claim_to_raw_populates_structural_hints_and_sanitizes_rejected_fields() -> None:
-    raw = model_client.flat_claim_to_raw(
-        SchemaFlatClaim(
-            claim_id="x1",
-            claim_type="result",
-            statement=" vLLM reaches 2-4x throughput gains. ",
-            source_section="",
-            evidence_ids=["fig_1", "fig_1"],
-            entity_names=["vLLM", "vLLM"],
-            rejected_what="not relevant",
-            rejected_why="not relevant",
-            elaborates_seed_id="s1",
-            local_role="implementation_detail",
-            preferred_parent_type="method",
-        ),
-        fallback_section="5 Results",
-    )
-
-    assert raw.claim_id == "x1"
-    assert raw.source_section == "5 Results"
-    assert [pointer.artifact_id for pointer in raw.evidence] == ["fig_1"]
-    assert raw.entity_names == ["vLLM"]
-    assert raw.rejected_what is None
-    assert raw.rejected_why is None
-    assert raw.structural_hints is not None
-    assert raw.structural_hints.elaborates_seed_id == "s1"
-    assert raw.structural_hints.local_role == ClaimLocalRole.implementation_detail
-    assert raw.structural_hints.preferred_parent_type == ParentPreference.method
-
-
-def test_flat_claim_schema_accepts_drifted_keys_and_coerces_values() -> None:
-    payload = {
-        "id": "n7",
-        "type": "negative",
-        "claim_text": "Compaction was rejected.",
-        "section": "2.3 Design Alternatives",
-        "evidence_artifact_ids": [{"artifact_id": "table_3"}, "table_3"],
-        "entities": "KV cache, compaction",
-        "rejection_reason": {"reason": "too expensive at serving scale"},
-    }
-    claim = SchemaFlatClaim.model_validate(payload)
-
-    assert claim.claim_id == "n7"
-    assert claim.claim_type == "negative"
-    assert claim.statement == "Compaction was rejected."
-    assert claim.evidence_ids == ["table_3"]
-    assert claim.entity_names == ["KV cache", "compaction"]
-    assert claim.rejected_why == "too expensive at serving scale"
-
-
-def test_flat_claim_to_raw_sanitizes_json_blob_rejected_why() -> None:
-    raw = model_client.flat_claim_to_raw(
-        SchemaFlatClaim(
-            claim_id="n1",
-            claim_type="negative",
-            statement="Online compaction was rejected.",
-            source_section="2.3 Design Alternatives",
-            rejected_what="online compaction",
-            rejected_why='{"reason":"compaction stalls decoding"}',
-        ),
-        fallback_section="2.3 Design Alternatives",
-    )
-
-    assert raw.rejected_what == "online compaction"
-    assert raw.rejected_why == "compaction stalls decoding"
 
 
 def test_call_model_uses_selected_tier_kwargs_and_returns_plain_text(

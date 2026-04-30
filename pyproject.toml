@@ -11,6 +11,8 @@ dependencies = [
     "openai>=1.50",
     "rich",
     "tiktoken",
+    "psycopg[binary,pool]>=3.2",
+    "pgvector>=0.3",
 ]
 
 [dependency-groups]

@@ -64,11 +64,7 @@ def load_config(config_path: str | Path | None = None) -> AppSettings:
         extract_equations=parsed.pipeline.pdf.extract_equations,
         min_section_chars=parsed.pipeline.pdf.min_section_chars,
         max_section_chars=parsed.pipeline.pdf.max_section_chars,
-        seed=parsed.pipeline.seed,
-        section_extraction=parsed.pipeline.section_extraction,
-        dedup=parsed.pipeline.dedup,
-        tree=parsed.pipeline.tree,
-        output=parsed.pipeline.output,
+        extraction=parsed.pipeline.extraction,
     )
 
     return AppSettings(

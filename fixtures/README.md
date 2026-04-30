@@ -6,12 +6,11 @@ Input PDFs used by unit tests, integration tests, and manual runs of the pipelin
 
 | File | Paper | Used by |
 |------|-------|---------|
-| [`vllm.pdf`](vllm.pdf) | Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention" (SOSP 2023). | [tests/test_pdf_parser.py](../tests/test_pdf_parser.py) (parsing), [tests/test_section.py](../tests/test_section.py) (`@api` section extraction), [tests/test_pipeline.py::test_pipeline_integration_vllm](../tests/test_pipeline.py) (`@api` end-to-end). |
+| [`vllm.pdf`](vllm.pdf) | Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention" (SOSP 2023). | [tests/test_pdf_parser.py](../tests/test_pdf_parser.py). |
 
 ## Why these fixtures exist
 
 - **Parser coverage.** `vllm.pdf` is a two-column conference paper with numbered headers, figures, tables, equations, and a references section — enough surface area to shake out every branch in `pdf_parser.py` (two-column ordering, header detection, caption pattern, reference stripping, artifact capture). Synthetic `fitz`-built PDFs in [`test_pdf_parser.py`](../tests/test_pdf_parser.py) cover additional edge cases (uniform font, short sections, hyphenated line breaks) that are awkward to find in real papers.
-- **Integration anchor.** The pipeline test expects tree roots ≥ 3, negatives ≥ 1, and total cost < $0.50 for this specific paper. That upper bound is a regression tripwire: a prompt change that inflates token usage on vLLM will trip the assertion before it silently blows the budget on every other paper.
 
 ## Adding a new fixture
 

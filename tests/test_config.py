@@ -14,7 +14,7 @@ def test_config_loads_without_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert settings.pipeline.min_section_chars > 0
     assert settings.pipeline.max_section_chars > settings.pipeline.min_section_chars
-    assert settings.pipeline.seed["model_tier"] == "small"
+    assert settings.raw.database.dsn_env
 
 
 def test_all_three_model_tiers_present(monkeypatch: pytest.MonkeyPatch) -> None:

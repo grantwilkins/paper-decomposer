@@ -15,20 +15,11 @@ from rich.console import Console
 from .config import get_config
 from .schema import (
     AppSettings,
-    ClaimLocalRole,
-    ClaimStructuralHints,
-    ClaimType,
-    EvidencePointer,
-    FlatClaim,
     ModelTier,
-    ParentPreference,
-    RawClaim,
 )
 
 _TOGETHER_BASE_URL = "https://api.together.xyz/v1"
 _JSON_REPAIR_SUFFIX = "Respond ONLY with valid JSON matching the schema. No preamble, no markdown fences."
-_NONE_LIKE_TOKENS = {"", "none", "n/a", "na", "null", "nil", "new", "unknown", "unspecified"}
-
 _client: AsyncOpenAI | None = None
 
 _COST_TRACKER: dict[str, float | int] = {
@@ -292,220 +283,6 @@ def _append_json_repair_suffix(messages: list[dict[str, Any]]) -> list[dict[str,
     return patched
 
 
-def _normalize_claim_type(value: str) -> ClaimType:
-    normalized = value.strip().lower()
-    aliases = {
-        "methods": "method",
-        "results": "result",
-        "assumptions": "assumption",
-        "contexts": "context",
-        "limitations": "negative",
-        "implication": "assumption",
-        "implications": "assumption",
-    }
-    return ClaimType(aliases.get(normalized, normalized))
-
-
-def _collapse_ws(value: str) -> str:
-    return " ".join(value.split())
-
-
-def _extract_json_text(value: Any) -> str | None:
-    if isinstance(value, Mapping):
-        for key in ("reason", "why", "because", "text", "statement", "message", "detail", "value"):
-            nested = value.get(key)
-            if nested is None:
-                continue
-            parsed = _normalize_optional_text(nested)
-            if parsed:
-                return parsed
-
-        parts = [_normalize_optional_text(item) for item in value.values()]
-        joined = "; ".join(part for part in parts if part)
-        return joined or None
-
-    if isinstance(value, (list, tuple, set)):
-        parts = [_normalize_optional_text(item) for item in value]
-        joined = "; ".join(part for part in parts if part)
-        return joined or None
-
-    return None
-
-
-def _normalize_optional_text(value: Any) -> str | None:
-    if value is None:
-        return None
-
-    if isinstance(value, str):
-        cleaned = _collapse_ws(value).strip().strip("\"'")
-        if not cleaned:
-            return None
-        lowered = cleaned.lower()
-        if lowered in _NONE_LIKE_TOKENS or lowered in {
-            "not applicable",
-            "not available",
-            "not specified",
-            "not provided",
-        }:
-            return None
-
-        if cleaned.startswith(("```", "{", "[")):
-            if cleaned.startswith("```"):
-                fence_candidates = [candidate.strip() for candidate in _JSON_FENCE_PATTERN.findall(cleaned) if candidate]
-                for candidate in fence_candidates:
-                    parsed_candidate = _normalize_optional_text(candidate)
-                    if parsed_candidate:
-                        return parsed_candidate
-
-            try:
-                parsed_json = json.loads(cleaned)
-            except json.JSONDecodeError:
-                return cleaned
-
-            recovered = _extract_json_text(parsed_json)
-            if recovered:
-                return recovered
-            return None
-
-        return cleaned
-
-    if isinstance(value, (int, float, bool)):
-        return _collapse_ws(str(value)) or None
-
-    extracted = _extract_json_text(value)
-    if extracted:
-        return extracted
-
-    return None
-
-
-def _normalize_local_role(value: str) -> ClaimLocalRole | None:
-    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
-    aliases = {
-        "top_level_mechanism": "top_level",
-        "top_level_method": "top_level",
-        "high_level": "top_level",
-        "detail": "implementation_detail",
-        "impl_detail": "implementation_detail",
-        "implementation": "implementation_detail",
-        "empirical": "empirical_finding",
-        "finding": "empirical_finding",
-        "limitation_or_rejection": "limitation",
-        "problem_gap": "context_gap",
-        "gap": "context_gap",
-        "positioning_claim": "positioning",
-    }
-    candidate = aliases.get(normalized, normalized)
-    if candidate in _NONE_LIKE_TOKENS:
-        return None
-    try:
-        return ClaimLocalRole(candidate)
-    except ValueError:
-        return None
-
-
-def _normalize_parent_preference(value: str) -> ParentPreference | None:
-    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
-    aliases = {
-        "method_parent": "method",
-        "context_parent": "context",
-        "result_parent": "method",
-        "auto": "none",
-        "unknown": "none",
-    }
-    candidate = aliases.get(normalized, normalized)
-    if candidate in _NONE_LIKE_TOKENS:
-        return None
-    try:
-        return ParentPreference(candidate)
-    except ValueError:
-        return None
-
-
-def _normalize_elaborates_seed_id(value: str) -> str | None:
-    cleaned = _collapse_ws(value).strip()
-    if not cleaned:
-        return None
-    lowered = cleaned.lower()
-    if lowered in _NONE_LIKE_TOKENS:
-        return None
-    return cleaned
-
-
-def _build_structural_hints(fc: FlatClaim, claim_type: ClaimType) -> ClaimStructuralHints | None:
-    local_role = _normalize_local_role(fc.local_role)
-    preferred_parent = _normalize_parent_preference(fc.preferred_parent_type)
-    elaborates_seed_id = _normalize_elaborates_seed_id(fc.elaborates_seed_id)
-
-    if preferred_parent is None:
-        if claim_type == ClaimType.context:
-            preferred_parent = ParentPreference.context
-        elif claim_type in {ClaimType.method, ClaimType.result, ClaimType.assumption, ClaimType.negative}:
-            preferred_parent = ParentPreference.method
-
-    if local_role is None:
-        if claim_type == ClaimType.result:
-            local_role = ClaimLocalRole.empirical_finding
-        elif claim_type == ClaimType.assumption:
-            local_role = ClaimLocalRole.assumption
-        elif claim_type == ClaimType.negative:
-            local_role = ClaimLocalRole.limitation
-        elif claim_type == ClaimType.context:
-            local_role = ClaimLocalRole.context_gap
-
-    if local_role is None and preferred_parent is None and elaborates_seed_id is None:
-        return None
-    return ClaimStructuralHints(
-        elaborates_seed_id=elaborates_seed_id,
-        local_role=local_role,
-        preferred_parent_type=preferred_parent,
-    )
-
-
-def flat_claim_to_raw(fc: FlatClaim, fallback_section: str = "") -> RawClaim:
-    claim_id = _collapse_ws(fc.claim_id).strip() or "claim"
-    source_section = _collapse_ws(fc.source_section).strip() or _collapse_ws(fallback_section).strip()
-    if not source_section:
-        source_section = "unknown"
-
-    evidence_ids: list[str] = []
-    for evidence_id in fc.evidence_ids:
-        normalized = _collapse_ws(evidence_id).strip()
-        if not normalized or normalized in evidence_ids:
-            continue
-        evidence_ids.append(normalized)
-
-    entity_names: list[str] = []
-    for entity_name in fc.entity_names:
-        normalized = _collapse_ws(entity_name).strip()
-        if not normalized or normalized in entity_names:
-            continue
-        entity_names.append(normalized)
-
-    rejected_what = _normalize_optional_text(fc.rejected_what)
-    rejected_why = _normalize_optional_text(fc.rejected_why)
-    claim_type = _normalize_claim_type(fc.claim_type)
-    statement = _collapse_ws(fc.statement).strip()
-    if not statement:
-        raise ValueError("Claim statement cannot be empty after normalization.")
-
-    if claim_type != ClaimType.negative:
-        rejected_what = None
-        rejected_why = None
-
-    return RawClaim(
-        claim_id=claim_id,
-        claim_type=claim_type,
-        statement=statement,
-        source_section=source_section,
-        evidence=[EvidencePointer(artifact_id=evidence_id, role="supports") for evidence_id in evidence_ids],
-        entity_names=entity_names,
-        rejected_what=rejected_what or None,
-        rejected_why=rejected_why or None,
-        structural_hints=_build_structural_hints(fc, claim_type),
-    )
-
-
 async def call_model(
     tier: ModelTier,
     messages: list[dict[str, Any]],
@@ -712,7 +489,6 @@ __all__ = [
     "ModelPreflightError",
     "call_model",
     "call_model_with_fallback",
-    "flat_claim_to_raw",
     "get_cost_tracker",
     "preflight_model_tiers",
     "reset_cost_tracker",

@@ -52,13 +52,8 @@ def _valid_config_dict() -> dict[str, Any]:
                 "min_section_chars": 250,
                 "max_section_chars": 7500,
             },
-            "seed": {"model_tier": "small"},
-            "section_extraction": {"model_tier": "small"},
-            "dedup": {"model_tier": "medium"},
-            "tree": {"model_tier": "heavy"},
-            "output": {"format": "json"},
+            "extraction": {},
         },
-        "facet_routing": {"systems": ["S1", "S2"]},
     }
 
 

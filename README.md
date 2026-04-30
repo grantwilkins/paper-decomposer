@@ -1,8 +1,8 @@
 # paper-decomposer
 
-A pipeline that converts a research paper PDF into a structured **claim decomposition**: a JSON tree of typed claims (context / method / result / assumption / negative), with domain-specific facets attached to method claims, dependency edges between claims, and a three-part "one-liner" summarizing what the paper achieved, how, and why.
+A pipeline that ingests ML / systems research papers (PDFs) into a Postgres-backed **methods / settings / outcomes / claims DAG**, designed to scale to hundreds of thousands of papers across the field.
 
-The target domain is ML / systems papers. All LLM calls go through the Together.ai serverless inference API (OpenAI-compatible endpoint).
+This repository is in the middle of a reset. The bones — PDF parsing into typed sections + artifacts, the LLM client, configuration — are in place. The extraction stage that turns parsed sections into DAG nodes is the next PR. See [src/paper_decomposer/db/schema.sql](src/paper_decomposer/db/schema.sql) for the storage shape.
 
 ---
 
@@ -10,17 +10,13 @@ The target domain is ML / systems papers. All LLM calls go through the Together.
 
 | Path | Purpose |
 |------|---------|
-| [src/paper_decomposer/](src/paper_decomposer/) | Primary package source: pipeline, schema, models client, PDF parser, prompts. |
-| [paper_decomposer/](paper_decomposer/) | Thin shim package at repo root that re-exports `src/paper_decomposer` so `python -m paper_decomposer …` works without editable install. |
-| [src/paper_decomposer/prompts/](src/paper_decomposer/prompts/) | One module per pipeline phase (seed, section, facets, dedup, tree). Each holds prompt strings, prompt builders, and the `extract_*` / `assemble_*` entry points. |
+| [src/paper_decomposer/](src/paper_decomposer/) | Primary package source: pipeline, schema, models client, PDF parser, DB layer. |
+| [src/paper_decomposer/db/](src/paper_decomposer/db/) | Postgres schema + async client for the methods/settings/outcomes/claims DAG. |
+| [paper_decomposer/](paper_decomposer/) | Thin shim package at repo root so `python -m paper_decomposer …` works without an editable install. |
 | [tests/](tests/) | Unit tests + `@pytest.mark.api` integration tests that hit Together. |
-| [fixtures/](fixtures/) | Real paper PDFs used as inputs for parser and integration tests. |
-| [output/](output/) | Default destination for `PaperDecomposition` JSON files (written by the pipeline). Not checked in as authoritative results. |
-| [config.yaml](config.yaml) | Sole runtime configuration file. Model tiers, pipeline phase settings, facet routing. |
-| [pyproject.toml](pyproject.toml) | Python project metadata, dependencies, pytest config. Sets `pythonpath = ["src"]`. |
-| [CLAUDE.md](CLAUDE.md) | Orientation for Claude Code sessions (commands, architecture summary). |
-| [implementation.md](implementation.md) | Long-form spec of the decomposition schema, facet question sets, and pipeline design. |
-| [tasks.md](tasks.md) | Tracking file for iterative validation tasks. |
+| [fixtures/](fixtures/) | Real paper PDFs used by parser tests. |
+| [config.yaml](config.yaml) | Sole runtime configuration file: API + model tiers + PDF parser + database. |
+| [pyproject.toml](pyproject.toml) | Dependencies and pytest config. Sets `pythonpath = ["src"]`. |
 | [main.py](main.py) | Placeholder script from `uv init`; not part of the pipeline. |
 
 ---
@@ -30,6 +26,7 @@ The target domain is ML / systems papers. All LLM calls go through the Together.
 - Python `>=3.10` (see `.python-version`).
 - [`uv`](https://docs.astral.sh/uv/) for dependency management.
 - A valid `TOGETHER_API_KEY` environment variable. [config.py](src/paper_decomposer/config.py) raises `ConfigError` at load time if it is missing.
+- For DB operations: a Postgres instance with `pgvector` and `pg_trgm` extensions available, exposed via the `PAPER_DECOMPOSER_DSN` environment variable.
 
 ---
 
@@ -39,67 +36,59 @@ The target domain is ML / systems papers. All LLM calls go through the Together.
 uv sync
 ```
 
-This creates `.venv/` and installs everything declared in [pyproject.toml](pyproject.toml) (`pymupdf`, `pyyaml`, `pydantic>=2.0`, `openai>=1.50`, `rich`, `tiktoken`) plus the dev group (`pytest>=8.0`).
+This creates `.venv/` and installs everything in [pyproject.toml](pyproject.toml): `pymupdf`, `pyyaml`, `pydantic`, `openai`, `rich`, `tiktoken`, `psycopg[binary,pool]`, `pgvector`, plus `pytest` in the dev group.
 
 ---
 
 ## Run
 
-**Single PDF:**
+**Parse a PDF (no DB writes yet):**
 
 ```bash
 python -m paper_decomposer path/to/paper.pdf --config config.yaml
 ```
 
-**Directory of PDFs (batch):**
-
-```bash
-python -m paper_decomposer path/to/dir/ --config config.yaml
-```
-
-**Dry run** (phase 0 only, prints the section table and exits):
+**Dry run** (parse + print the section table only):
 
 ```bash
 python -m paper_decomposer path/to/paper.pdf --dry-run
 ```
 
-The output is a JSON file in `pipeline.output.output_dir` (default `./output/`), named from the sanitized paper title. Pre-existing names get a numeric suffix (`_2`, `_3`, …) instead of overwriting.
+**Apply the database schema:**
+
+```bash
+psql "$PAPER_DECOMPOSER_DSN" -f src/paper_decomposer/db/schema.sql
+```
 
 ---
 
-## Pipeline at a glance
+## Storage shape
 
-One PDF in → one [`PaperDecomposition`](src/paper_decomposer/schema.py#L418) out, via five sequential phases. See [src/paper_decomposer/README.md](src/paper_decomposer/README.md) for the detailed flow.
+The DAG schema lives in [src/paper_decomposer/db/schema.sql](src/paper_decomposer/db/schema.sql). At a glance:
 
-| Phase | Module | Model tier | Input → Output |
-|-------|--------|------------|----------------|
-| 0   | [pdf_parser.py](src/paper_decomposer/pdf_parser.py) | — | PDF → `PaperDocument` (sections + artifacts) |
-| 0b  | [models.py](src/paper_decomposer/models.py) `preflight_model_tiers` | all required | Ping each required tier to fail fast. |
-| 1   | [prompts/seed.py](src/paper_decomposer/prompts/seed.py) | `small` | Abstract → 3–7 seed `RawClaim`s |
-| 2   | [prompts/section.py](src/paper_decomposer/prompts/section.py) | `small` | Each non-abstract/non-reference section → `RawClaim`s (parallel, semaphore-capped) |
-| 2b  | [prompts/facets.py](src/paper_decomposer/prompts/facets.py) | `small` | Each method claim → classify intervention → domain facets + universal facets |
-| 3   | [prompts/dedup.py](src/paper_decomposer/prompts/dedup.py) | `medium` | All claims → canonical claim list + groups |
-| 4   | [prompts/tree.py](src/paper_decomposer/prompts/tree.py) | `heavy` | Claims + facets + negatives + artifacts → `PaperDecomposition` with tree + `OneLiner` |
+- **`methods`** — DAG nodes for the methods hierarchy (multi-parent allowed). `canonical_parent_id` selects one parent for tree-style display; `method_edges` carries the full DAG.
+- **`settings`** — DAG nodes for datasets / tasks / applications / workloads / hardware. Same pattern as `methods`.
+- **`outcomes`** — `(paper, method, setting, metric, value, delta, baseline_method)` rows.
+- **`claims`** — typed, scored claims with optional embeddings, linked to one or more methods/settings/outcomes via `claim_links`.
+
+Indexing: B-tree for canonical lookups, `pg_trgm` GIN for fuzzy-name lookups across aliases, HNSW (pgvector) for semantic dedup. DAG traversal uses recursive CTEs over the `*_edges` tables.
 
 ---
 
 ## Tests
 
 ```bash
-# Fast tests only (no network)
+# Fast tests only (no network, no live DB)
 uv run pytest -m "not api"
 
 # Full suite including live Together calls (requires TOGETHER_API_KEY)
 uv run pytest -m api
-
-# Single test
-uv run pytest tests/test_pipeline.py::test_pipeline_aborts_when_preflight_fails
 ```
 
-Integration tests are marked with `@pytest.mark.api`. See [tests/README.md](tests/README.md).
+See [tests/README.md](tests/README.md) for the per-file breakdown.
 
 ---
 
 ## Cost tracking
 
-Every `call_model` invocation updates a process-global `_COST_TRACKER` dict in [models.py](src/paper_decomposer/models.py). `reset_cost_tracker()` is called at the start of every `decompose_paper`; the accumulated total is written into `PaperDecomposition.extraction_cost_usd` and logged at the end of the run.
+Every `call_model` invocation updates a process-global `_COST_TRACKER` dict in [models.py](src/paper_decomposer/models.py). Per-million rates come from `config.yaml`'s `models.<tier>.input_cost_per_m` / `output_cost_per_m`. Reset and inspect with `reset_cost_tracker()` / `get_cost_tracker()`.
