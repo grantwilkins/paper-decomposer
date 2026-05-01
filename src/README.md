@@ -19,7 +19,7 @@ There is intentionally only one subdirectory. A second package named `paper_deco
 
 ## Import contract
 
-- Production code: `from paper_decomposer.pipeline import decompose_paper`, `from paper_decomposer.schema import …`, etc.
+- Production code: `from paper_decomposer.pipeline import ingest_paper`, `from paper_decomposer.schema import …`, etc.
 - Tests: same imports, because `pythonpath = ["src"]` is applied by pytest.
 - CLI: `python -m paper_decomposer` invokes `__main__.py` which calls `cli.main()`.
 

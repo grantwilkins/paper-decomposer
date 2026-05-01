@@ -81,8 +81,11 @@ Indexing: B-tree for canonical lookups, `pg_trgm` GIN for fuzzy-name lookups acr
 # Fast tests only (no network, no live DB)
 uv run pytest -m "not api"
 
-# Full suite including live Together calls (requires TOGETHER_API_KEY)
+# API tests only (live Together; requires TOGETHER_API_KEY)
 uv run pytest -m api
+
+# Full suite
+uv run pytest
 ```
 
 See [tests/README.md](tests/README.md) for the per-file breakdown.
