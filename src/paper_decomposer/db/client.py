@@ -44,12 +44,40 @@ class PaperDecomposerDB:
     ) -> UUID:
         raise NotImplementedError
 
+    async def create_extraction_run(
+        self,
+        *,
+        paper_id: UUID,
+        metadata: dict[str, Any] | None = None,
+    ) -> UUID:
+        raise NotImplementedError
+
+    async def insert_evidence_span(
+        self,
+        *,
+        paper_id: UUID,
+        extraction_run_id: UUID,
+        local_span_id: str,
+        section_title: str,
+        section_kind: str,
+        text: str,
+        page_start: int | None = None,
+        page_end: int | None = None,
+        artifact_id: str | None = None,
+        source_kind: str = "paragraph",
+    ) -> UUID:
+        raise NotImplementedError
+
     async def upsert_method(
         self,
         *,
+        paper_id: UUID,
+        extraction_run_id: UUID,
+        local_node_id: str,
         canonical_name: str,
         description: str | None = None,
         canonical_parent_id: UUID | None = None,
+        metadata: dict[str, Any] | None = None,
         embedding: list[float] | None = None,
     ) -> UUID:
         raise NotImplementedError
@@ -61,17 +89,34 @@ class PaperDecomposerDB:
         child_id: UUID,
         relation: str,
         confidence: float = 1.0,
-    ) -> None:
+        metadata: dict[str, Any] | None = None,
+    ) -> UUID:
         raise NotImplementedError
 
     async def upsert_setting(
         self,
         *,
+        paper_id: UUID,
+        extraction_run_id: UUID,
+        local_setting_id: str,
         kind: str,
         canonical_name: str,
         description: str | None = None,
         canonical_parent_id: UUID | None = None,
+        metadata: dict[str, Any] | None = None,
         embedding: list[float] | None = None,
+    ) -> UUID:
+        raise NotImplementedError
+
+    async def add_method_setting_link(
+        self,
+        *,
+        paper_id: UUID,
+        method_id: UUID,
+        setting_id: UUID,
+        relation: str,
+        confidence: float = 1.0,
+        metadata: dict[str, Any] | None = None,
     ) -> UUID:
         raise NotImplementedError
 

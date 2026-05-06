@@ -1,6 +1,19 @@
 from __future__ import annotations
 
+from typing import Any
+from uuid import uuid4, uuid5, NAMESPACE_URL
+
 from .config import load_config
+from .extraction.assembler import assemble_extraction
+from .extraction.contracts import ExtractionCaps, PaperExtraction
+from .extraction.evidence import select_evidence_spans
+from .extraction.stages import (
+    compress_paper_extraction,
+    extract_claims_and_outcomes,
+    extract_frontmatter_sketch,
+    extract_method_graph,
+)
+from .extraction.validators import validate_extraction
 from .pdf_parser import parse_pdf
 from .schema import PaperDocument
 
@@ -16,4 +29,87 @@ async def ingest_paper(pdf_path: str, config_path: str = "config.yaml") -> Paper
     return document
 
 
-__all__ = ["ingest_paper"]
+async def extract_paper(pdf_path: str, config_path: str = "config.yaml") -> PaperExtraction:
+    config = load_config(config_path)
+    document = parse_pdf(pdf_path, config)
+    return await extract_document(document, config=config)
+
+
+async def extract_document(document: PaperDocument, *, config: Any) -> PaperExtraction:
+    extraction_config = _extraction_config(config)
+    if int(extraction_config.get("max_model_calls_per_paper", 5)) < 4:
+        raise ValueError("Extraction requires at least 4 model calls per paper.")
+
+    paper_id = str(uuid5(NAMESPACE_URL, document.metadata.title))
+    extraction_run_id = str(uuid4())
+    spans = select_evidence_spans(
+        document,
+        paper_id=paper_id,
+        max_chars_per_stage=int(extraction_config.get("max_input_chars_per_stage", 50_000)),
+        include_captions=bool(extraction_config.get("include_captions", True)),
+        include_table_text=bool(extraction_config.get("include_table_text", True)),
+    )
+    if not spans:
+        raise ValueError("No high-signal evidence spans were selected for extraction.")
+
+    sketch = await extract_frontmatter_sketch(_frontmatter_spans(spans), config=config)
+    graph = await extract_method_graph(_method_spans(spans), sketch, config=config)
+    claims = await extract_claims_and_outcomes(_evaluation_spans(spans), graph, config=config)
+    final = await compress_paper_extraction(graph, claims, config=config)
+    extraction = assemble_extraction(
+        paper_id=paper_id,
+        extraction_run_id=extraction_run_id,
+        title=document.metadata.title,
+        evidence_spans=spans,
+        sketch=sketch,
+        graph=graph,
+        claims=claims,
+        final=final,
+    )
+
+    caps = _extraction_caps(extraction_config)
+    report = validate_extraction(extraction, caps=caps)
+    if report.blocking_errors:
+        codes = ", ".join(error.code for error in report.blocking_errors)
+        raise ValueError(f"Extraction failed deterministic validation: {codes}")
+    return extraction
+
+
+def _frontmatter_spans(spans: list[Any]) -> list[Any]:
+    selected = [
+        span
+        for span in spans
+        if span.source_kind in {"abstract", "contribution"} or span.section_kind in {"introduction", "abstract"}
+    ]
+    return selected or spans[: min(4, len(spans))]
+
+
+def _method_spans(spans: list[Any]) -> list[Any]:
+    selected = [span for span in spans if span.section_kind in {"method", "theory"}]
+    return selected or spans
+
+
+def _evaluation_spans(spans: list[Any]) -> list[Any]:
+    selected = [
+        span
+        for span in spans
+        if span.section_kind in {"evaluation", "discussion"} or span.source_kind in {"caption", "table_text", "conclusion"}
+    ]
+    return selected or spans
+
+
+def _extraction_config(config: Any) -> dict[str, Any]:
+    extraction = getattr(getattr(config, "pipeline", None), "extraction", None)
+    if isinstance(extraction, dict):
+        return extraction
+    return {}
+
+
+def _extraction_caps(extraction_config: dict[str, Any]) -> ExtractionCaps:
+    caps = extraction_config.get("caps", {})
+    if isinstance(caps, dict):
+        return ExtractionCaps.model_validate(caps)
+    return ExtractionCaps()
+
+
+__all__ = ["extract_document", "extract_paper", "ingest_paper"]

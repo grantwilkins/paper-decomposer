@@ -32,14 +32,15 @@ Implement the extraction stage that turns parsed paper sections and artifacts in
 - Add typed extraction contracts under `src/paper_decomposer/extraction/`.
 - Add `EvidenceSpan` with paper, section, page, text, artifact, and source-kind provenance.
 - Add `CandidateNode` for raw model-proposed systems, mechanisms, settings, scenarios, metrics, and artifacts.
-- Add `ExtractedNode` for promoted paper-local nodes with canonical name, aliases, description, kind, status, evidence, confidence, granularity rationale, and mechanism sentence when the node is a method.
+- Add `ExtractedNode` for promoted paper-local method-family nodes only: systems, methods, and method categories.
 - Add `ExtractedEdge` for paper-local graph relationships with endpoints, relation kind, evidence, and confidence.
-- Add `ExtractedSetting` for datasets, tasks, applications, workloads, hardware, and model artifacts.
+- Add `ExtractedSetting` for datasets, tasks, applications, workloads, hardware, model artifacts, and metrics.
 - Add `ExtractedOutcome` for explicit metric/value/baseline rows grounded in supplied text or parser-extracted table text.
 - Add `ExtractedClaim` with raw text, normalized finding, claim type, linked methods/settings/outcomes, evidence span IDs, and confidence.
 - Add `DemotedItem` with name, reason demoted, stored-under target, and evidence span IDs.
 - Add `PaperExtraction` as the top-level paper-local JSON envelope.
 - Add `ExtractionValidationError` for deterministic validation failures.
+- Add `ValidationSeverity` with `error` and `warning`.
 - Preserve each claim's raw text and evidence span IDs.
 - Require each promoted method node to have a mechanism sentence stating inputs, outputs, and operative move.
 - Require each demoted item to store the promoted node or setting where it belongs.
@@ -72,7 +73,7 @@ Implement the extraction stage that turns parsed paper sections and artifacts in
 - Combine logical extractors into 3-5 actual model calls for the normal path.
 - Use cheap Together-hosted models by default.
 - Use a cheap retry for malformed JSON or simple schema failures.
-- Escalate only for repeated validation failure, paper-outline-shaped graphs, ambiguous claim attachment, high-value papers, or uncertain global merge decisions.
+- Escalate only for repeated validation failure, paper-outline-shaped graphs, ambiguous claim attachment, or high-value papers.
 
 ## Validate Deterministically
 
@@ -88,14 +89,24 @@ Implement the extraction stage that turns parsed paper sections and artifacts in
 - Validate that the graph is not a paper section outline.
 - Validate that generic categories are not method nodes unless explicitly justified.
 - Validate that scenarios are usually settings, tasks, workloads, or claim contexts rather than method nodes.
+- Classify validation failures as blocking errors or non-blocking warnings.
+- Treat missing evidence, missing edge endpoints, invalid enums, missing method mechanism sentences, and nonexistent claim targets as blocking errors.
+- Treat high node counts, unusual system node counts, and unverifiable numeric grounding from table formatting as warnings unless configured as errors.
 
 ## Write Extracted Records to the Database
 
 - Map promoted system and method nodes to `methods`.
 - Map aliases to `method_aliases`.
-- Map paper-local method relationships to `method_edges`, translating relation kinds into schema-supported values.
-- Map datasets, tasks, applications, workloads, and hardware to `settings`.
-- Decide whether model artifacts require a schema change, metadata preservation, or a supported setting kind.
+- Decide how paper-local nodes are namespaced before writing to shared tables.
+- Do not globally deduplicate methods or settings by canonical name in the first PR.
+- Preserve `paper_id`, `local_node_id`, and `extraction_run_id` for every extracted node.
+- Map paper-local `uses` relationships to `method_edges.composes`.
+- Map paper-local `is_a` relationships to `method_edges.is_a`.
+- Reserve paper-local `refines` relationships for `method_edges.refines` when present.
+- Do not map cross-family `applies_to` edges into `method_edges`.
+- Represent method-setting applicability through a `method_setting_links` table, claim links, outcome context, or an explicitly documented MVP fallback.
+- Map datasets, tasks, applications, workloads, hardware, model artifacts, and metrics to `settings`.
+- Prefer adding `model_artifact` or `model` to `settings.kind` before DB writing.
 - Map setting hierarchy and composition to `setting_edges`, translating relation kinds into schema-supported values.
 - Map explicit normalized metric rows to `outcomes`.
 - Store outcome evidence, original values, units, and parser provenance in outcome metadata when supported.
@@ -103,6 +114,10 @@ Implement the extraction stage that turns parsed paper sections and artifacts in
 - Store claim raw text, extracted finding, linked local IDs, confidence, and evidence metadata in claim metadata when supported.
 - Map claim relationships to `claim_links`.
 - Preserve claim provenance in `claim_evidence`.
+- Add or identify a persistence path for evidence spans attached to methods, settings, method edges, setting edges, and method-setting links.
+- Prefer `evidence_spans` plus generic `evidence_links` for node and edge provenance.
+- Accept metadata JSONB on methods, settings, method edges, and setting edges only as a concise MVP fallback.
+- Do not drop method, setting, or edge evidence after validation.
 - Keep the first implementation paper-local and avoid overbuilding cross-paper deduplication.
 
 ## Integrate the CLI
@@ -113,6 +128,7 @@ Implement the extraction stage that turns parsed paper sections and artifacts in
 - Add validation failure reporting with actionable messages.
 - Add a cost summary using the existing model cost tracker.
 - Add configurable model-call and token or character budgets.
+- Add machine-readable extraction caps for systems, methods, settings, claims, outcomes, and demoted items.
 - Add configuration for cheap default extraction and optional adjudication tiers.
 - Keep parse-only dry run behavior intact.
 

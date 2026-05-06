@@ -32,17 +32,16 @@ src/paper_decomposer/extraction/
   validators.py
   assembler.py
   db_writer.py
-  pipeline.py
 ```
 
-- `contracts.py`: Pydantic models for evidence spans, extracted nodes, settings, outcomes, claims, demoted items, extraction envelopes, and validation errors.
+- `contracts.py`: Pydantic models for evidence spans, method-family nodes, settings, outcomes, claims, demoted items, extraction envelopes, validation severity, and validation errors.
 - `evidence.py`: section selection, artifact inclusion, evidence span chunking, and provenance preservation.
 - `prompts.py`: short schema-bound prompt builders and extraction rules.
 - `stages.py`: budget-aware calls into `call_model` for sketching, method extraction, claim extraction, compression, and repair.
 - `validators.py`: deterministic validation of graph shape, evidence grounding, node granularity, numeric grounding, and schema integrity.
 - `assembler.py`: merge stage outputs into one paper-local extraction JSON document.
 - `db_writer.py`: translate validated paper-local records into the existing database schema.
-- `pipeline.py`: extraction orchestration after `parse_pdf` and before optional DB persistence.
+- `src/paper_decomposer/pipeline.py`: extraction orchestration after `parse_pdf` and before optional DB persistence.
 
 # Data Contracts
 
@@ -61,7 +60,7 @@ src/paper_decomposer/extraction/
 ## ExtractedNode
 
 - `local_node_id`: stable paper-local node identifier.
-- `kind`: `system`, `method`, `method_category`, `application`, `task`, `metric`, `hardware`, `model_artifact`, `dataset`, or `workload`.
+- `kind`: `system`, `method`, or `method_category`.
 - `canonical_name`: normalized paper-local name.
 - `aliases`: names used in the paper.
 - `description`: concise text-grounded description.
@@ -74,6 +73,8 @@ src/paper_decomposer/extraction/
 
 Create method nodes only for reusable mechanisms that pass the method-node test: can one sentence specify the method's inputs, outputs, and operative move?
 
+`PaperExtraction.nodes` should contain only method-family objects. `PaperExtraction.settings` should contain applications, tasks, datasets, workloads, hardware, model artifacts, and metrics. Keeping the two families separate matches the current database shape and avoids ambiguity during assembly and persistence.
+
 ## ExtractedEdge
 
 - `parent_id`: local parent node identifier.
@@ -82,19 +83,19 @@ Create method nodes only for reusable mechanisms that pass the method-node test:
 - `evidence_span_ids`: cited evidence spans.
 - `confidence`: extraction confidence.
 
-The current database allows `is_a`, `specializes`, `composes`, and `refines` for method and setting edges. The writer should translate paper-local relation kinds to supported database relations and preserve original relation text in metadata only where the schema supports it.
+The current database allows `is_a`, `specializes`, `composes`, and `refines` for method and setting edges. Method-family relationships should use `uses`, `is_a`, or `refines`. Cross-family applicability should use `applies_to` and should not be written to `method_edges`.
 
 ## ExtractedSetting
 
 - `local_setting_id`: stable paper-local setting identifier.
-- `kind`: `application`, `task`, `dataset`, `workload`, `hardware`, or `model_artifact`.
+- `kind`: `application`, `task`, `dataset`, `workload`, `hardware`, `model_artifact`, or `metric`.
 - `canonical_name`: normalized setting name.
 - `aliases`: names used in the paper.
 - `description`: concise grounded description.
 - `evidence_span_ids`: cited evidence spans.
 - `confidence`: extraction confidence.
 
-The current `settings.kind` enum supports `dataset`, `task`, `application`, `workload`, and `hardware`. `model_artifact` needs either a schema change, metadata preservation under a supported row, or explicit deferral.
+The current `settings.kind` enum supports `dataset`, `task`, `application`, `workload`, and `hardware`. The DB writer should not leave model artifacts ambiguous. Prefer adding `model_artifact` or `model` to the enum before persistence so outcomes can be retrieved by model-conditioned settings.
 
 ## ExtractedOutcome
 
@@ -133,6 +134,8 @@ Outcomes should be extracted only when values are explicit in prose or parser-ex
 
 Each claim must retain raw text and evidence span IDs. Claims should attach to the most specific valid method, setting, or outcome.
 
+`raw_text` should copy source text from supplied evidence spans when possible. `finding` is the normalized paraphrase. Do not put paraphrases in `raw_text` unless the source is a table or caption fragment that cannot be copied cleanly.
+
 ## DemotedItem
 
 - `name`: demoted candidate name.
@@ -141,6 +144,17 @@ Each claim must retain raw text and evidence span IDs. Claims should attach to t
 - `evidence_span_ids`: cited evidence spans.
 
 Demoted items preserve useful implementation details, scenarios, and components without making them first-class method nodes.
+
+## ExtractionValidationError
+
+- `message`: concise validation finding.
+- `severity`: `error` or `warning`.
+- `code`: stable behavior-named identifier.
+- `object_kind`: affected object family when known.
+- `object_id`: local object identifier when known.
+- `evidence_span_ids`: related evidence spans when relevant.
+
+Blocking errors should prevent DB writes. Warnings should be reported and may become errors through configuration.
 
 # LLM Stage Design
 
@@ -226,7 +240,7 @@ Model tier: cheap or medium.
 Run only when deterministic validation fails.
 
 - Retry malformed JSON or simple schema failure with the cheap model once.
-- Use a medium model only for repeated validation failure, oversized graphs, paper-outline-shaped graphs, ambiguous claim attachment, high-value papers, or uncertain merge decisions.
+- Use a medium model only for repeated validation failure, oversized graphs, paper-outline-shaped graphs, ambiguous claim attachment, or high-value papers.
 
 # Prompting Strategy
 
@@ -239,7 +253,8 @@ Hard rules:
 - Do not promote generic categories.
 - Do not create nodes for paper sections.
 - Do not create nodes for implementation details unless they pass the method-node test.
-- Claims must quote or paraphrase only from supplied evidence spans.
+- Claim `raw_text` fields must copy source text from supplied evidence spans when possible.
+- Use `finding` for normalized claim paraphrases.
 - Numeric values should be preserved exactly.
 - Ranges should not be collapsed.
 - Scenarios should usually be settings, tasks, workloads, or claim contexts rather than methods.
@@ -278,21 +293,54 @@ Checks:
 - Scenario variants are not promoted into separate method nodes unless each passes the method-node test.
 - Claims do not rely on visual impressions from figures.
 
+Blocking errors:
+
+- Missing evidence span.
+- Missing edge endpoint.
+- Invalid enum value.
+- Method missing mechanism sentence.
+- Claim references nonexistent node, setting, or outcome.
+
+Warnings:
+
+- Method node count is high.
+- System node count is unusual.
+- Numeric grounding cannot be verified because table text formatting changed.
+- Claim attachment is valid but broad.
+
 # DB Mapping
 
 The first implementation should map validated paper-local extraction output into the existing schema without assuming a global canonicalization system.
 
 - `system` and `method` nodes map to `methods`.
 - Method aliases map to `method_aliases`.
-- Method relationships map to `method_edges` after translating paper-local `uses`, `applies_to`, and `is_a` into schema-supported relations.
-- `application`, `task`, `dataset`, `workload`, and `hardware` map to `settings`.
+- Paper-local `uses` relationships map to `method_edges.composes`.
+- Paper-local `is_a` relationships map to `method_edges.is_a`.
+- Paper-local `refines` relationships map to `method_edges.refines`.
+- Paper-local `applies_to` relationships do not map to `method_edges`.
+- Method-setting applicability maps to `method_setting_links`.
+- `application`, `task`, `dataset`, `workload`, `hardware`, `model_artifact`, and `metric` map to `settings`.
 - Setting relationships map to `setting_edges` after translating paper-local relations into schema-supported relations.
 - Explicit normalized metric rows map to `outcomes`.
 - Typed claims map to `claims`.
 - Claim relationships map to `claim_links`.
 - Claim provenance maps to `claim_evidence`.
 
-The current schema has metadata JSON columns on `outcomes` and `claims`, but not on `methods`, `method_edges`, `settings`, or `setting_edges`. Store provenance and extraction details in JSON metadata where available. Add schema changes only when inspection shows the current schema cannot preserve information needed for the extraction contract.
+The schema includes `extraction_runs`, `evidence_spans`, `evidence_links`, and metadata JSON columns on methods, method edges, settings, setting edges, method-setting links, outcomes, and claims. Do not validate evidence and then discard method, setting, or edge provenance.
+
+## Paper-local versus Global IDs
+
+The first extraction PR writes paper-local graph objects. A `canonical_name` is canonical only within a paper extraction run. It must not be used for cross-paper deduplication. Global entity resolution is future work.
+
+Each persisted extraction object should preserve:
+
+- `paper_id`.
+- `extraction_run_id`.
+- `local_node_id` or local object ID.
+- Source evidence span IDs.
+- Extraction confidence.
+
+Do not implement `upsert_method(canonical_name)` or `upsert_setting(kind, canonical_name)` in a way that silently merges unrelated concepts across papers.
 
 # Cost Controls
 
@@ -304,7 +352,7 @@ Cost efficiency is a first-class requirement.
 - Cap model calls per paper.
 - Use cheap Together-hosted models by default.
 - Retry malformed JSON once with the cheap model.
-- Escalate only on validation failure, ambiguous attachment, oversized graph shape, high-value papers, or uncertain merge decisions.
+- Escalate only on validation failure, ambiguous attachment, oversized graph shape, or high-value papers.
 - Track cost using the existing cost tracker in `models.py`.
 - Expose cost summary in the CLI.
 - Make model tiers configurable in `config.yaml`.
@@ -322,6 +370,13 @@ extraction:
   include_captions: true
   include_table_text: true
   require_numeric_grounding: true
+  caps:
+    max_system_nodes: 2
+    max_method_nodes: 12
+    max_setting_nodes: 30
+    max_claims: 25
+    max_outcomes: 40
+    max_demoted_items: 40
 ```
 
 If the repository continues to use `small`, `medium`, and `heavy` as model tier names, map `cheap` to the configured `small` tier or rename the suggested key before implementation.

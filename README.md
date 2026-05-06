@@ -2,7 +2,7 @@
 
 A pipeline that ingests ML / systems research papers (PDFs) into a Postgres-backed **methods / settings / outcomes / claims DAG**, designed to scale to hundreds of thousands of papers across the field.
 
-This repository is in the middle of a reset. The bones — PDF parsing into typed sections + artifacts, the LLM client, configuration — are in place. The extraction stage that turns parsed sections into DAG nodes is the next PR. See [src/paper_decomposer/db/schema.sql](src/paper_decomposer/db/schema.sql) for the storage shape.
+This repository is in the middle of a reset. PDF parsing, the LLM client, runtime configuration, and the first paper-local extraction stage are in place. The remaining DB work is the transaction layer that persists validated extraction JSON through the schema in [src/paper_decomposer/db/schema.sql](src/paper_decomposer/db/schema.sql).
 
 ---
 
@@ -54,6 +54,12 @@ python -m paper_decomposer path/to/paper.pdf --config config.yaml
 python -m paper_decomposer path/to/paper.pdf --dry-run
 ```
 
+**Extraction dry run** (parse + validated paper-local extraction JSON; no DB writes):
+
+```bash
+python -m paper_decomposer path/to/paper.pdf --extract --output-json extraction.json
+```
+
 **Apply the database schema:**
 
 ```bash
@@ -67,9 +73,11 @@ psql "$PAPER_DECOMPOSER_DSN" -f src/paper_decomposer/db/schema.sql
 The DAG schema lives in [src/paper_decomposer/db/schema.sql](src/paper_decomposer/db/schema.sql). At a glance:
 
 - **`methods`** — DAG nodes for the methods hierarchy (multi-parent allowed). `canonical_parent_id` selects one parent for tree-style display; `method_edges` carries the full DAG.
-- **`settings`** — DAG nodes for datasets / tasks / applications / workloads / hardware. Same pattern as `methods`.
+- **`settings`** — DAG nodes for datasets / tasks / applications / workloads / hardware / model artifacts / metrics. Same pattern as `methods`.
+- **`method_setting_links`** — cross-family method-to-setting applicability. `applies_to` does not belong in `method_edges`.
 - **`outcomes`** — `(paper, method, setting, metric, value, delta, baseline_method)` rows.
 - **`claims`** — typed, scored claims with optional embeddings, linked to one or more methods/settings/outcomes via `claim_links`.
+- **`evidence_spans` / `evidence_links`** — text-grounded provenance for paper-local nodes, edges, settings, outcomes, and claims.
 
 Indexing: B-tree for canonical lookups, `pg_trgm` GIN for fuzzy-name lookups across aliases, HNSW (pgvector) for semantic dedup. DAG traversal uses recursive CTEs over the `*_edges` tables.
 

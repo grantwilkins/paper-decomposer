@@ -17,15 +17,19 @@ from paper_decomposer.db.client import _SCHEMA_PATH
 REQUIRED_EXTENSIONS = ("pgcrypto", "pg_trgm", "vector")
 REQUIRED_TABLES = (
     "papers",
+    "extraction_runs",
+    "evidence_spans",
     "methods",
     "method_aliases",
     "method_edges",
     "settings",
     "setting_edges",
+    "method_setting_links",
     "outcomes",
     "claims",
     "claim_links",
     "claim_evidence",
+    "evidence_links",
 )
 
 
@@ -53,3 +57,13 @@ def test_schema_path_is_inside_db_package() -> None:
     assert _SCHEMA_PATH.parent.name == "db"
     assert _SCHEMA_PATH.name == "schema.sql"
     assert isinstance(_SCHEMA_PATH, Path)
+
+
+def test_schema_supports_paper_local_extraction_provenance(schema_sql: str) -> None:
+    assert "extraction_run_id" in schema_sql
+    assert "local_node_id" in schema_sql
+    assert "local_setting_id" in schema_sql
+    assert "local_span_id" in schema_sql
+    assert "model_artifact" in schema_sql
+    assert "method_setting_links" in schema_sql
+    assert "evidence_links" in schema_sql
