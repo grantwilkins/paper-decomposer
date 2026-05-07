@@ -176,7 +176,7 @@ Outcomes should be extracted only when values are explicit in prose or parser-ex
 
 - `claim_id`: stable local claim identifier.
 - `paper_id`: paper identifier.
-- `claim_type`: normalized type such as performance, memory, scalability, quality, capability, limitation, or comparison.
+- `claim_type`: normalized type such as performance, memory, scalability, quality, capability, limitation, comparison, or overhead.
 - `raw_text`: source-grounded claim text.
 - `finding`: concise normalized finding.
 - `metric`: metric text when applicable.
@@ -360,6 +360,10 @@ Checks:
 - Every method node has a mechanism sentence.
 - Every method node has a granularity rationale.
 - Every numeric value appears in evidence text when possible.
+- End-to-end throughput/request-rate claims should attach to the system node.
+- Claims with metric plus value/delta plus comparator/baseline should link to explicit outcomes.
+- Problems/challenges should not be stored as application/task/workload settings.
+- Coarse scenario buckets should be split into named task/application settings when evidence names them.
 - Node count is not suspiciously high.
 - Paper section headings are not method nodes.
 - Demoted items do not also appear as promoted nodes.

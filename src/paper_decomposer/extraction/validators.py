@@ -103,6 +103,26 @@ def validate_extraction(
         errors.extend(
             _missing_evidence_errors("setting", setting.local_setting_id, setting.evidence_span_ids, evidence_by_id)
         )
+        if _is_problem_setting(setting.canonical_name, setting.kind):
+            errors.append(
+                _warning(
+                    "problem_stored_as_setting",
+                    "Problem/challenge context should not be stored as an application, task, or workload setting.",
+                    object_kind="setting",
+                    object_id=setting.local_setting_id,
+                    evidence_span_ids=setting.evidence_span_ids,
+                )
+            )
+        if _is_coarse_scenario_setting(setting.canonical_name, extraction.evidence_spans):
+            errors.append(
+                _warning(
+                    "scenario_bucket_setting",
+                    "Generic scenario bucket should be split into named task/application settings.",
+                    object_kind="setting",
+                    object_id=setting.local_setting_id,
+                    evidence_span_ids=setting.evidence_span_ids,
+                )
+            )
 
     for edge in extraction.edges:
         if edge.parent_id not in node_by_id or edge.child_id not in node_by_id:
@@ -257,6 +277,26 @@ def validate_extraction(
                     evidence_span_ids=claim.evidence_span_ids,
                 )
             )
+        if _claim_requires_outcome(claim):
+            errors.append(
+                _warning(
+                    "structured_claim_without_outcome",
+                    "Claim has metric, value/delta, and comparator/baseline but is not linked to an explicit outcome row.",
+                    object_kind="claim",
+                    object_id=claim.claim_id,
+                    evidence_span_ids=claim.evidence_span_ids,
+                )
+            )
+        if _overall_system_claim_attached_too_low(claim, extraction):
+            errors.append(
+                _warning(
+                    "system_claim_attached_to_method_only",
+                    "End-to-end system claim should attach to the system node, not only to a supporting method.",
+                    object_kind="claim",
+                    object_id=claim.claim_id,
+                    evidence_span_ids=claim.evidence_span_ids,
+                )
+            )
         if not (claim.method_ids or claim.setting_ids or claim.outcome_ids):
             errors.append(
                 _error(
@@ -309,6 +349,7 @@ def validate_extraction(
 
     errors.extend(_cap_warnings(extraction, caps))
     errors.extend(_evidence_span_warnings(extraction))
+    errors.extend(_graph_quality_warnings(extraction, evidence_by_id))
     return ExtractionValidationReport(errors=errors)
 
 
@@ -350,6 +391,16 @@ def _graph_shape_errors(extraction: PaperExtraction) -> list[ExtractionValidatio
                 "Method graph must include the paper-local system or introduced artifact root.",
             )
         )
+
+    if extraction.graph.systems and extraction.graph.methods:
+        system_ids = {node.local_node_id for node in extraction.graph.systems}
+        if not any(edge.parent_id in system_ids for edge in extraction.edges):
+            errors.append(
+                _error(
+                    "system_method_edge_missing",
+                    "Method graph must connect the system root to at least one method node.",
+                )
+            )
 
     method_family_count = len(extraction.nodes)
     if method_family_count >= 2 and not extraction.edges:
@@ -457,6 +508,89 @@ def _evidence_span_warnings(extraction: PaperExtraction) -> list[ExtractionValid
     return warnings
 
 
+def _graph_quality_warnings(
+    extraction: PaperExtraction,
+    evidence_by_id: dict[str, object],
+) -> list[ExtractionValidationError]:
+    warnings: list[ExtractionValidationError] = []
+    warnings.extend(_preemption_topology_warnings(extraction))
+    warnings.extend(_empty_demotion_warnings(extraction))
+    warnings.extend(_status_warnings(extraction, evidence_by_id))
+    return warnings
+
+
+def _preemption_topology_warnings(extraction: PaperExtraction) -> list[ExtractionValidationError]:
+    node_by_id = {node.local_node_id: node for node in extraction.nodes}
+    warnings: list[ExtractionValidationError] = []
+    for edge in extraction.edges:
+        parent = node_by_id.get(edge.parent_id)
+        child = node_by_id.get(edge.child_id)
+        if parent is None or child is None:
+            continue
+        parent_name = _normalize_identifier(parent.canonical_name)
+        child_name = _normalize_identifier(child.canonical_name)
+        if "pagedattention" not in parent_name and "paged attention" not in parent_name:
+            continue
+        if "swapping" not in child_name and "recomputation" not in child_name:
+            continue
+        warnings.append(
+            _warning(
+                "preemption_topology_suspicious",
+                "Swapping/recomputation should usually sit under sequence-group preemption, not directly under the attention algorithm.",
+                object_kind="edge",
+                object_id=f"{edge.parent_id}->{edge.child_id}",
+                evidence_span_ids=edge.evidence_span_ids,
+            )
+        )
+    return warnings
+
+
+def _empty_demotion_warnings(extraction: PaperExtraction) -> list[ExtractionValidationError]:
+    if extraction.demoted_items:
+        return []
+    component_markers = ("manager", "scheduler", "worker", "kernel", "api", "frontend")
+    span_ids = [
+        span.span_id
+        for span in extraction.evidence_spans
+        if span.section_kind in {"method", "other"} and any(marker in span.text.casefold() for marker in component_markers)
+    ]
+    if not span_ids:
+        return []
+    return [
+        _warning(
+            "demoted_items_empty_for_component_heavy_paper",
+            "Method/design evidence contains implementation components but demoted_items is empty.",
+            evidence_span_ids=span_ids[:10],
+        )
+    ]
+
+
+def _status_warnings(
+    extraction: PaperExtraction,
+    evidence_by_id: dict[str, object],
+) -> list[ExtractionValidationError]:
+    warnings: list[ExtractionValidationError] = []
+    for node in extraction.nodes:
+        if node.status != "uncertain":
+            continue
+        evidence_text = " ".join(str(getattr(evidence_by_id.get(span_id), "text", "")) for span_id in node.evidence_span_ids)
+        normalized_text = _normalize_identifier(evidence_text)
+        if not _name_appears_in_text(node.canonical_name, normalized_text):
+            continue
+        if not any(marker in normalized_text for marker in ("we propose", "we build", "we design", "we implement", "we introduce", "we develop")):
+            continue
+        warnings.append(
+            _warning(
+                "paper_local_status_uncertain",
+                "Evidence says the paper proposes/builds/designs this node; paper-local status should usually be claimed_new.",
+                object_kind="node",
+                object_id=node.local_node_id,
+                evidence_span_ids=node.evidence_span_ids,
+            )
+        )
+    return warnings
+
+
 def _cap_warnings(extraction: PaperExtraction, caps: ExtractionCaps) -> list[ExtractionValidationError]:
     system_count = len(extraction.graph.systems)
     method_count = len(extraction.graph.methods)
@@ -529,6 +663,58 @@ def _claim_needs_structured_fields(claim: object) -> bool:
         return False
     comparison_markers = ("compared", "than", "higher", "lower", "versus", " vs ", "×", "x", "%")
     return any(marker in text for marker in comparison_markers)
+
+
+def _claim_requires_outcome(claim: object) -> bool:
+    return bool(
+        getattr(claim, "metric", None)
+        and (getattr(claim, "value", None) or getattr(claim, "delta", None))
+        and (getattr(claim, "baseline", None) or getattr(claim, "comparator", None))
+        and not getattr(claim, "outcome_ids", [])
+    )
+
+
+def _overall_system_claim_attached_too_low(claim: object, extraction: PaperExtraction) -> bool:
+    if not extraction.graph.systems:
+        return False
+    method_ids = set(getattr(claim, "method_ids", []))
+    if any(system.local_node_id in method_ids for system in extraction.graph.systems):
+        return False
+    if not method_ids:
+        return False
+    text = _normalize_identifier(f"{getattr(claim, 'raw_text', '')} {getattr(claim, 'finding', '')}")
+    if not any(_name_appears_in_text(system.canonical_name, text) for system in extraction.graph.systems):
+        return False
+    metric_text = _normalize_identifier(
+        f"{getattr(claim, 'metric', '')} {getattr(claim, 'raw_text', '')} {getattr(claim, 'finding', '')}"
+    )
+    if "overhead" in metric_text or "kernel latency" in metric_text:
+        return False
+    return any(term in metric_text for term in ("request rate", "throughput", "latency", "requests"))
+
+
+def _is_problem_setting(name: str, kind: str) -> bool:
+    if kind not in {"application", "task", "workload"}:
+        return False
+    normalized = _normalize_identifier(name)
+    problem_terms = ("inefficiency", "challenge", "problem", "limitation", "bottleneck", "fragmentation issue")
+    return any(term in normalized for term in problem_terms)
+
+
+def _is_coarse_scenario_setting(name: str, spans: list[object]) -> bool:
+    normalized_name = _normalize_identifier(name)
+    if normalized_name not in {"decoding scenarios", "decoding scenario"}:
+        return False
+    text = _normalize_identifier(" ".join(str(getattr(span, "text", "")) for span in spans))
+    named_scenarios = ("parallel sampling", "beam search", "shared prefix", "chatbot")
+    return any(scenario in text for scenario in named_scenarios)
+
+
+def _name_appears_in_text(name: str, normalized_text: str) -> bool:
+    normalized_name = _normalize_identifier(name)
+    if not normalized_name:
+        return False
+    return f" {normalized_name} " in f" {normalized_text} "
 
 
 def _is_concrete_reusable_method_demoted_for_missing_mechanism(name: str, reason: str) -> bool:

@@ -31,9 +31,15 @@ Graph calibration:
   first-class method nodes unless the paper introduces a new reusable mechanism for that scenario.
 - Demote implementation support such as fused kernels, fork/append/free APIs, frontend frameworks,
   scheduler message plumbing, code size, and implementation language.
-- Attach composed throughput claims to the system. Attach memory-layout and kernel-overhead claims
-  to PagedAttention or its most specific supporting mechanism.
+- Attach composed end-to-end throughput/request-rate claims to the system. Attach memory-sharing
+  claims to the most specific sharing mechanism. Attach kernel-overhead claims to PagedAttention
+  or its most specific supporting mechanism, and use claim_type=overhead for costs/slowdowns.
+- Split named task/settings nodes such as parallel sampling, beam search, shared-prefix prompting,
+  chatbot serving, ShareGPT, Alpaca, WMT16 English-to-German, OPT-13B, LLaMA-13B, and NVIDIA A100.
+  Do not store problems such as KV-cache memory inefficiency as application settings.
 - For comparison claims, fill metric, delta/value, baseline, and comparator when present in raw text.
+- For claims with metric plus delta/value plus comparator/baseline, create explicit outcome rows and
+  link the claims to those outcomes.
 - Use meaningful confidence for evidence-copied claims and cited edges; do not emit 0.0 for clearly
   grounded objects.
 """.strip()

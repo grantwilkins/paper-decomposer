@@ -18,6 +18,7 @@ ClaimType = Literal[
     "capability",
     "limitation",
     "comparison",
+    "overhead",
     "other",
 ]
 NodeStatus = Literal["claimed_new", "reference", "uncertain"]

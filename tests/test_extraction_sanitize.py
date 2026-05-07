@@ -8,6 +8,9 @@ Plausible wrong implementations:
 - Keep methods without mechanism sentences after repair.
 - Remove invalid nodes but leave edges, links, claims, or outcomes pointing to them.
 - Drop useful evidence instead of preserving invalid nodes as demoted items.
+- Preserve a graph that is structurally valid but semantically too flat for DB writes.
+- Leave end-to-end system claims attached only to supporting methods.
+- Keep numeric claims as prose without outcome rows.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from paper_decomposer.extraction.contracts import (
     PaperExtraction,
 )
 from paper_decomposer.extraction.sanitize import demote_invalid_method_nodes
+from paper_decomposer.extraction.sanitize import preserve_graph_and_attach_claims
 from paper_decomposer.extraction.validators import validate_extraction
 
 
@@ -209,3 +213,219 @@ def test_missing_mechanism_sentence_can_be_grounded_from_cited_evidence() -> Non
         "TinyAttention maps logical cache blocks to physical cache blocks on demand."
     )
     assert sanitized.demoted_items == []
+
+
+def test_graph_quality_repair_tightens_vllm_topology_settings_claims_and_outcomes() -> None:
+    extraction = PaperExtraction(
+        paper_id="paper-1",
+        extraction_run_id="run-1",
+        title="vLLM",
+        evidence_spans=[
+            EvidenceSpan(
+                span_id="abstract",
+                paper_id="paper-1",
+                section_title="Abstract",
+                section_kind="abstract",
+                text="To address this problem, we propose PagedAttention. On top of it, we build vLLM, an LLM serving system.",
+            ),
+            EvidenceSpan(
+                span_id="method",
+                paper_id="paper-1",
+                section_title="PagedAttention",
+                section_kind="method",
+                text="The KV cache manager uses block tables for parallel sampling and beam search with copy-on-write.",
+            ),
+            EvidenceSpan(
+                span_id="preemption",
+                paper_id="paper-1",
+                section_title="Scheduling and Preemption",
+                section_kind="method",
+                text="Sequence groups are preempted together; recovery uses swapping or recomputation.",
+            ),
+            EvidenceSpan(
+                span_id="eval",
+                paper_id="paper-1",
+                section_title="Evaluation",
+                section_kind="evaluation",
+                text=(
+                    "vLLM can sustain 2x higher request rates than Orca. "
+                    "vLLM achieves 6.1%-9.8% memory saving on parallel sampling and 37.6%-55.2% on beam search. "
+                    "PagedAttention incurs 20-26% higher attention kernel latency compared to FasterTransformer."
+                ),
+            ),
+        ],
+        nodes=[
+            ExtractedNode(
+                local_node_id="system:vLLM",
+                kind="system",
+                canonical_name="vLLM",
+                description="LLM serving system.",
+                status="uncertain",
+                granularity_rationale="Top-level system.",
+                evidence_span_ids=["abstract"],
+            ),
+            ExtractedNode(
+                local_node_id="method:PagedAttention",
+                kind="method",
+                canonical_name="PagedAttention",
+                description="Paged KV attention.",
+                status="uncertain",
+                granularity_rationale="Central primitive.",
+                mechanism_sentence="PagedAttention maps logical KV cache blocks to physical blocks on demand.",
+                evidence_span_ids=["abstract"],
+            ),
+            ExtractedNode(
+                local_node_id="method:blockwise_KV_blocks",
+                kind="method",
+                canonical_name="Block-wise KV cache",
+                description="KV cache uses blocks.",
+                granularity_rationale="Reusable representation.",
+                mechanism_sentence="The KV cache is partitioned into fixed-size blocks for memory management.",
+                evidence_span_ids=["method"],
+            ),
+            ExtractedNode(
+                local_node_id="method:block_level_sharing",
+                kind="method",
+                canonical_name="Block-level KV cache sharing",
+                description="KV blocks are shared.",
+                granularity_rationale="Reusable sharing mechanism.",
+                mechanism_sentence="Physical KV blocks are shared across logical blocks to reduce duplicate memory.",
+                evidence_span_ids=["method"],
+            ),
+            ExtractedNode(
+                local_node_id="method:copy_on_write",
+                kind="method",
+                canonical_name="Copy-on-write",
+                description="Shared blocks are copied before mutation.",
+                granularity_rationale="Reusable sharing support.",
+                mechanism_sentence="When a shared physical block is modified, a private copy is created before writing.",
+                evidence_span_ids=["method"],
+            ),
+            ExtractedNode(
+                local_node_id="method:kv_cache_swapping",
+                kind="method",
+                canonical_name="KV-cache swapping",
+                description="KV blocks can be swapped.",
+                granularity_rationale="Reusable recovery mechanism.",
+                mechanism_sentence="Evicted KV cache blocks are copied to CPU memory and restored later.",
+                evidence_span_ids=["preemption"],
+            ),
+            ExtractedNode(
+                local_node_id="method:kv_cache_recomputation",
+                kind="method",
+                canonical_name="KV-cache recomputation",
+                description="KV blocks can be recomputed.",
+                granularity_rationale="Reusable recovery mechanism.",
+                mechanism_sentence="Evicted KV cache blocks are recomputed from prior tokens when the sequence resumes.",
+                evidence_span_ids=["preemption"],
+            ),
+        ],
+        edges=[
+            ExtractedEdge(parent_id="method:PagedAttention", child_id="method:blockwise_KV_blocks", relation_kind="uses", evidence_span_ids=["method"]),
+            ExtractedEdge(parent_id="method:PagedAttention", child_id="method:block_level_sharing", relation_kind="uses", evidence_span_ids=["method"]),
+            ExtractedEdge(parent_id="method:PagedAttention", child_id="method:copy_on_write", relation_kind="uses", evidence_span_ids=["method"]),
+            ExtractedEdge(parent_id="method:PagedAttention", child_id="method:kv_cache_swapping", relation_kind="uses", evidence_span_ids=["preemption"]),
+            ExtractedEdge(parent_id="method:PagedAttention", child_id="method:kv_cache_recomputation", relation_kind="uses", evidence_span_ids=["preemption"]),
+        ],
+        settings=[
+            ExtractedSetting(
+                local_setting_id="setting:KV_cache_memory_inefficiency",
+                kind="application",
+                canonical_name="KV-cache memory inefficiency",
+                description="Problem context.",
+                evidence_span_ids=["abstract"],
+            ),
+            ExtractedSetting(
+                local_setting_id="setting:decoding_scenarios",
+                kind="application",
+                canonical_name="Decoding scenarios",
+                description="Coarse bucket.",
+                evidence_span_ids=["method"],
+            ),
+        ],
+        method_setting_links=[
+            ExtractedMethodSettingLink(
+                method_id="method:PagedAttention",
+                setting_id="setting:KV_cache_memory_inefficiency",
+                relation_kind="applies_to",
+                evidence_span_ids=["abstract"],
+            ),
+            ExtractedMethodSettingLink(
+                method_id="method:block_level_sharing",
+                setting_id="setting:decoding_scenarios",
+                relation_kind="applies_to",
+                evidence_span_ids=["method"],
+            ),
+        ],
+        claims=[
+            ExtractedClaim(
+                claim_id="c1",
+                paper_id="paper-1",
+                claim_type="performance",
+                raw_text="vLLM can sustain 2x higher request rates than Orca.",
+                finding="vLLM can sustain 2x higher request rates than Orca.",
+                method_ids=["method:PagedAttention"],
+                setting_ids=["setting:KV_cache_memory_inefficiency"],
+                metric="request rate",
+                delta="2x",
+                comparator="Orca",
+                evidence_span_ids=["eval"],
+            ),
+            ExtractedClaim(
+                claim_id="c2",
+                paper_id="paper-1",
+                claim_type="memory",
+                raw_text="vLLM achieves 6.1%-9.8% memory saving on parallel sampling and 37.6%-55.2% on beam search.",
+                finding="vLLM saves memory on parallel sampling and beam search.",
+                method_ids=["method:block_level_sharing"],
+                setting_ids=["setting:decoding_scenarios"],
+                metric="memory saving",
+                delta="6.1%-55.2%",
+                comparator="without sharing",
+                evidence_span_ids=["eval"],
+            ),
+            ExtractedClaim(
+                claim_id="c3",
+                paper_id="paper-1",
+                claim_type="performance",
+                raw_text="PagedAttention incurs 20-26% higher attention kernel latency compared to FasterTransformer.",
+                finding="PagedAttention incurs 20-26% higher attention kernel latency.",
+                method_ids=["method:PagedAttention"],
+                metric="attention kernel latency",
+                delta="20-26%",
+                comparator="FasterTransformer",
+                evidence_span_ids=["eval"],
+            ),
+        ],
+    )
+
+    repaired = preserve_graph_and_attach_claims(extraction)
+
+    edge_pairs = {(edge.parent_id, edge.child_id) for edge in repaired.edges}
+    assert ("system:vLLM", "method:PagedAttention") in edge_pairs
+    assert ("method:block_level_sharing", "method:copy_on_write") in edge_pairs
+    assert ("method:sequence_group_preemption", "method:kv_cache_swapping") in edge_pairs
+    assert ("method:sequence_group_preemption", "method:kv_cache_recomputation") in edge_pairs
+
+    method_names = {node.canonical_name for node in repaired.graph.methods}
+    assert "Block-wise KV cache address translation" in method_names
+    assert "Sequence-group preemption" in method_names
+
+    setting_ids = {setting.local_setting_id for setting in repaired.settings}
+    assert "setting:KV_cache_memory_inefficiency" not in setting_ids
+    assert {"setting:llm_serving", "setting:parallel_sampling", "setting:beam_search"} <= setting_ids
+    assert {item.name for item in repaired.demoted_items} >= {
+        "KV-cache memory inefficiency",
+        "Decoding scenarios",
+        "KV cache manager",
+    }
+
+    claim_by_id = {claim.claim_id: claim for claim in repaired.claims}
+    assert claim_by_id["c1"].method_ids == ["system:vLLM"]
+    assert "setting:llm_serving" in claim_by_id["c1"].setting_ids
+    assert {"setting:parallel_sampling", "setting:beam_search"} <= set(claim_by_id["c2"].setting_ids)
+    assert claim_by_id["c3"].claim_type == "overhead"
+    assert all(claim.outcome_ids for claim in repaired.claims)
+    assert {outcome.outcome_id for outcome in repaired.outcomes} == {"outcome:c1", "outcome:c2", "outcome:c3"}
+
+    assert validate_extraction(repaired).ok

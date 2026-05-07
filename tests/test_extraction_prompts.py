@@ -52,7 +52,9 @@ def test_prompts_demote_applications_and_implementation_support() -> None:
     assert "applications/settings or claim contexts" in system_content
     assert "fused kernels" in system_content
     assert "fork/append/free APIs" in system_content
-    assert "Attach composed throughput claims to the system" in system_content
+    assert "Attach composed end-to-end throughput/request-rate claims to the system" in system_content
+    assert "claim_type=overhead" in system_content
+    assert "create explicit outcome rows" in system_content
     assert "fill metric, delta/value, baseline, and comparator" in system_content
     assert "graph.systems" in user_content
     assert "Do not include final candidates" in user_content

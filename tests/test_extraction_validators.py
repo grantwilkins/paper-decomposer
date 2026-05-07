@@ -12,6 +12,7 @@ Plausible wrong implementations:
 - Treat demoted implementation details as first-class nodes.
 - Normalize or invent numeric evidence instead of checking cited text.
 - Promote paper section headings as method nodes.
+- Miss DB-write quality warnings for system-level claims, coarse settings, topology, status, and outcomes.
 """
 
 from __future__ import annotations
@@ -345,6 +346,93 @@ def test_validator_warns_when_numeric_value_is_not_in_cited_evidence() -> None:
 
     assert report.ok
     assert "numeric_grounding_unverified" in {warning.code for warning in report.warnings}
+
+
+def test_validator_warns_for_graph_quality_issues_before_db_write() -> None:
+    extraction = _valid_extraction()
+    extraction.evidence_spans.extend(
+        [
+            EvidenceSpan(
+                span_id="s2",
+                paper_id="paper-1",
+                section_title="Abstract",
+                section_kind="abstract",
+                text="We propose PagedAttention and build vLLM for LLM serving.",
+            ),
+            EvidenceSpan(
+                span_id="s3",
+                paper_id="paper-1",
+                section_title="Evaluation",
+                section_kind="evaluation",
+                text="vLLM can sustain 2x higher request rates than Orca on parallel sampling and beam search.",
+            ),
+            EvidenceSpan(
+                span_id="s4",
+                paper_id="paper-1",
+                section_title="Scheduling and Preemption",
+                section_kind="method",
+                text="The scheduler can use swapping and recomputation to recover preempted sequence groups.",
+            ),
+        ]
+    )
+    extraction.graph.method_edges = [
+        ExtractedEdge(parent_id="m1", child_id="swap", relation_kind="uses", evidence_span_ids=["s4"])
+    ]
+    extraction.graph.methods.append(
+        ExtractedNode(
+            local_node_id="swap",
+            kind="method",
+            canonical_name="KV-cache swapping",
+            description="KV-cache recovery strategy.",
+            granularity_rationale="Reusable recovery strategy.",
+            mechanism_sentence="Evicted KV cache blocks are copied to CPU memory and restored later.",
+            evidence_span_ids=["s4"],
+        )
+    )
+    extraction.settings.extend(
+        [
+            ExtractedSetting(
+                local_setting_id="problem",
+                kind="application",
+                canonical_name="KV-cache memory inefficiency",
+                description="Problem context.",
+                evidence_span_ids=["s2"],
+            ),
+            ExtractedSetting(
+                local_setting_id="bucket",
+                kind="application",
+                canonical_name="Decoding scenarios",
+                description="Coarse task bucket.",
+                evidence_span_ids=["s3"],
+            ),
+        ]
+    )
+    extraction.claims[0] = ExtractedClaim(
+        claim_id="c0",
+        paper_id="paper-1",
+        claim_type="performance",
+        raw_text="vLLM can sustain 2x higher request rates than Orca on parallel sampling and beam search.",
+        finding="vLLM can sustain 2x higher request rates than Orca.",
+        method_ids=["m1"],
+        setting_ids=["bucket"],
+        metric="request rate",
+        delta="2x",
+        comparator="Orca",
+        evidence_span_ids=["s3"],
+    )
+    extraction.nodes[1].status = "uncertain"
+    extraction.nodes[1].evidence_span_ids = ["s2"]
+
+    report = validate_extraction(extraction)
+
+    warning_codes = {warning.code for warning in report.warnings}
+    assert "problem_stored_as_setting" in warning_codes
+    assert "scenario_bucket_setting" in warning_codes
+    assert "structured_claim_without_outcome" in warning_codes
+    assert "system_claim_attached_to_method_only" in warning_codes
+    assert "preemption_topology_suspicious" in warning_codes
+    assert "demoted_items_empty_for_component_heavy_paper" in warning_codes
+    assert "paper_local_status_uncertain" in warning_codes
 
 
 def test_validator_blocks_nonexistent_claim_outcome_setting_edge_and_method_setting_targets() -> None:
