@@ -37,7 +37,7 @@ src/paper_decomposer/extraction/
 - `contracts.py`: Pydantic models for evidence spans, method-family nodes, settings, outcomes, claims, demoted items, extraction envelopes, validation severity, and validation errors.
 - `evidence.py`: section selection, artifact inclusion, evidence span chunking, and provenance preservation.
 - `prompts.py`: short schema-bound prompt builders and extraction rules.
-- `stages.py`: budget-aware calls into `call_model` for sketching, method extraction, claim extraction, and compression.
+- `stages.py`: budget-aware calls into `call_model` for sketching, method extraction, claim extraction, compression, and repair.
 - `validators.py`: deterministic validation of graph shape, evidence grounding, node granularity, numeric grounding, and schema integrity.
 - `assembler.py`: merge stage outputs into one paper-local extraction JSON document.
 - `db_write_plan.py`: translate validated paper-local records into an unresolved local-ID write plan for the live DB writer.

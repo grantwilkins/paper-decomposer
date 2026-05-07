@@ -17,12 +17,15 @@ from .contracts import (
     ExtractedNode,
     ExtractedOutcome,
     ExtractedSetting,
+    ExtractionValidationError,
+    PaperExtraction,
 )
 from .prompts import (
     claims_outcomes_prompt,
     compression_prompt,
     frontmatter_prompt,
     method_graph_prompt,
+    repair_prompt,
 )
 
 
@@ -125,6 +128,20 @@ async def compress_paper_extraction(
     )
 
 
+async def repair_paper_extraction(
+    extraction: PaperExtraction,
+    validation_errors: list[ExtractionValidationError],
+    *,
+    config: Any,
+) -> ExtractionDraft:
+    return await call_model(
+        _adjudication_model_tier(config),
+        repair_prompt(extraction.model_dump_json(), validation_errors, extraction.evidence_spans),
+        response_schema=ExtractionDraft,
+        config=config,
+    )
+
+
 def _default_model_tier(config: Any) -> ModelTier:
     return _model_tier_from_config(config, key="default_model_tier", default="small")
 
@@ -164,4 +181,5 @@ __all__ = [
     "extract_claims_and_outcomes",
     "extract_frontmatter_sketch",
     "extract_method_graph",
+    "repair_paper_extraction",
 ]

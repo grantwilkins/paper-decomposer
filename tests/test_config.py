@@ -29,6 +29,16 @@ def test_all_three_model_tiers_present(monkeypatch: pytest.MonkeyPatch) -> None:
         assert tier_config.max_tokens > 0
 
 
+def test_small_tier_is_distinct_low_cost_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TOGETHER_API_KEY", "test-key")
+
+    settings = load_config(CONFIG_PATH)
+
+    assert settings.model_tiers["small"].model != settings.model_tiers["heavy"].model
+    assert settings.raw.models.small.output_cost_per_m < settings.raw.models.medium.output_cost_per_m
+    assert settings.raw.models.small.output_cost_per_m < settings.raw.models.heavy.output_cost_per_m
+
+
 def test_missing_api_key_raises_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
 

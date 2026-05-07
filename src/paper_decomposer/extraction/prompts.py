@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .contracts import EvidenceSpan
+from .contracts import EvidenceSpan, ExtractionValidationError
 
 RULES = (
     "Return JSON only. Use only supplied evidence span IDs. Do not invent evidence. "
@@ -50,8 +50,31 @@ def compression_prompt(graph_json: str, claims_json: str) -> list[dict[str, str]
         {
             "role": "user",
             "content": "Compress to final paper-local extraction JSON. Keep method-family nodes separate from settings. "
-            "Do not put applies_to in method edges.\n\n"
+            "Do not put applies_to in method edges. Every method node must include mechanism_sentence. "
+            "Do not create nodes named after section headings.\n\n"
             f"Graph:\n{graph_json}\n\nClaims and outcomes:\n{claims_json}",
+        },
+    ]
+
+
+def repair_prompt(
+    extraction_json: str,
+    validation_errors: list[ExtractionValidationError],
+    evidence_spans: list[EvidenceSpan],
+) -> list[dict[str, str]]:
+    errors = "\n".join(
+        f"- {error.code}: {error.object_kind or ''} {error.object_id or ''} {error.message}".strip()
+        for error in validation_errors
+    )
+    return [
+        {"role": "system", "content": RULES},
+        {
+            "role": "user",
+            "content": "Repair this extraction JSON so deterministic validation passes. "
+            "For method_missing_mechanism_sentence, either add a grounded mechanism_sentence with inputs, outputs, "
+            "and operative move, or demote/remove the invalid method. For section_heading_promoted, demote/remove "
+            "the section-heading node and repair affected edges/links/claims. Keep only supplied evidence IDs.\n\n"
+            f"Validation errors:\n{errors}\n\nExtraction JSON:\n{extraction_json}\n\nEvidence:\n{_format_spans(evidence_spans, max_span_chars=1000)}",
         },
     ]
 
@@ -72,4 +95,5 @@ __all__ = [
     "compression_prompt",
     "frontmatter_prompt",
     "method_graph_prompt",
+    "repair_prompt",
 ]

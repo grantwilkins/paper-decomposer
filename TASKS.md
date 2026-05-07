@@ -31,7 +31,6 @@ Finish the path from validated paper-local extraction JSON to durable Postgres r
 
 ## Remaining Extraction Work
 
-- Add repair/adjudication behavior for validation failures if cheap extraction output is malformed or graph-shaped incorrectly.
 - Decide whether `require_numeric_grounding` should block extraction by default or only in DB-write mode.
 - Add optional preflight for only the model tiers used in the current run.
 - Keep visual figure extraction out of scope unless a future explicit feature adds it.
@@ -47,7 +46,6 @@ Finish the path from validated paper-local extraction JSON to durable Postgres r
 
 - Add DB writer tests with a fake or temporary Postgres-compatible boundary.
 - Add local-ID to UUID resolution tests for methods, settings, edges, claims, outcomes, and evidence links.
-- Add mocked repair/adjudication tests.
 - Add API smoke coverage for a tiny selected-section fixture.
 - Add ORCA-like and vLLM-like smoke tests that check graph shape, not exhaustive exact output.
 
