@@ -9,7 +9,6 @@ MethodNodeKind = Literal["system", "method", "method_category"]
 SettingKind = Literal["application", "task", "dataset", "workload", "hardware", "model_artifact", "metric"]
 MethodRelationKind = Literal["uses", "is_a", "refines"]
 MethodSettingRelationKind = Literal["applies_to", "evaluated_on"]
-ClaimTargetKind = Literal["method", "setting", "outcome"]
 ClaimType = Literal[
     "performance",
     "memory",
@@ -222,7 +221,6 @@ class ExtractionValidationReport(BaseModel):
 
 __all__ = [
     "CandidateNode",
-    "ClaimTargetKind",
     "ClaimType",
     "DemotedItem",
     "EvidenceSpan",

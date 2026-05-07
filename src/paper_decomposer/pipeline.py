@@ -19,11 +19,7 @@ from .schema import PaperDocument
 
 
 async def ingest_paper(pdf_path: str, config_path: str = "config.yaml") -> PaperDocument:
-    """Parse a paper PDF into a `PaperDocument`.
-
-    The follow-up PR will: extract methods/settings/outcomes/claims from the
-    parsed sections, embed them, and persist via `db.PaperDecomposerDB`.
-    """
+    """Parse a paper PDF into a `PaperDocument` without extraction or DB writes."""
     config = load_config(config_path)
     document = parse_pdf(pdf_path, config)
     return document

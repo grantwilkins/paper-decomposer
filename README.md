@@ -17,7 +17,6 @@ This repository is in the middle of a reset. PDF parsing, the LLM client, runtim
 | [fixtures/](fixtures/) | Real paper PDFs used by parser tests. |
 | [config.yaml](config.yaml) | Sole runtime configuration file: API + model tiers + PDF parser + database. |
 | [pyproject.toml](pyproject.toml) | Dependencies and pytest config. Sets `pythonpath = ["src"]`. |
-| [main.py](main.py) | Placeholder script from `uv init`; not part of the pipeline. |
 
 ---
 

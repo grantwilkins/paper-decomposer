@@ -29,7 +29,7 @@ class PaperDecomposerDB:
             async with conn.cursor() as cur:
                 await cur.execute(sql)
 
-    # ── Write paths (skeletons; filled in by the next PR) ──────────────
+    # ── Transaction helpers for the live DB writer ─────────────────────
 
     async def upsert_paper(
         self,
