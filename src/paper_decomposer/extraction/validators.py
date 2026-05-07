@@ -68,6 +68,8 @@ def validate_extraction(
     section_titles = {_normalize(span.section_title) for span in extraction.evidence_spans}
 
     errors.extend(_graph_shape_errors(extraction))
+    errors.extend(_evidence_class_errors(extraction))
+    errors.extend(_duplicate_id_errors("outcome", [outcome.outcome_id for outcome in extraction.outcomes]))
 
     for node in extraction.nodes:
         errors.extend(_missing_evidence_errors("node", node.local_node_id, node.evidence_span_ids, evidence_by_id))
@@ -243,6 +245,16 @@ def validate_extraction(
                 )
             )
         errors.extend(_missing_evidence_errors("outcome", outcome.outcome_id, outcome.evidence_span_ids, evidence_by_id))
+        if not outcome.outcome_id.startswith("local:outcome:"):
+            errors.append(
+                _error(
+                    "outcome_id_not_local",
+                    "Outcome IDs must use local:outcome:* syntax.",
+                    object_kind="outcome",
+                    object_id=outcome.outcome_id,
+                    evidence_span_ids=outcome.evidence_span_ids,
+                )
+            )
         errors.extend(
             _numeric_grounding_findings(
                 "outcome",
@@ -270,12 +282,32 @@ def validate_extraction(
         for setting_id in claim.setting_ids:
             if setting_id not in setting_by_id:
                 errors.append(_missing_target_error("claim_setting_missing", "claim", claim.claim_id, setting_id))
+            elif getattr(setting_by_id[setting_id], "kind", None) == "metric":
+                errors.append(
+                    _error(
+                        "claim_uses_metric_setting",
+                        "Metric settings must not be used as experimental-condition claim settings; keep metrics on outcomes.",
+                        object_kind="claim",
+                        object_id=claim.claim_id,
+                        evidence_span_ids=claim.evidence_span_ids,
+                    )
+                )
         for problem_id in claim.problem_ids:
             if problem_id not in problem_by_id:
                 errors.append(_missing_target_error("claim_problem_missing", "claim", claim.claim_id, problem_id))
         for outcome_id in claim.outcome_ids:
             if outcome_id not in outcome_by_id:
                 errors.append(_missing_target_error("claim_outcome_missing", "claim", claim.claim_id, outcome_id))
+            elif not outcome_id.startswith("local:outcome:"):
+                errors.append(
+                    _error(
+                        "claim_outcome_id_not_local",
+                        "Claim outcome references must use local:outcome:* IDs.",
+                        object_kind="claim",
+                        object_id=claim.claim_id,
+                        evidence_span_ids=claim.evidence_span_ids,
+                    )
+                )
         errors.extend(_missing_evidence_errors("claim", claim.claim_id, claim.evidence_span_ids, evidence_by_id))
         if _uses_non_claim_evidence(claim.evidence_span_ids, evidence_by_id):
             errors.append(
@@ -398,6 +430,16 @@ def validate_extraction(
                     evidence_span_ids=item.evidence_span_ids,
                 )
             )
+        if _is_mechanism_detail_demoted_as_junk(item.name, item.reason_demoted, item.stored_under):
+            errors.append(
+                _error(
+                    "mechanism_detail_demoted_as_junk",
+                    "Mechanism concepts should be stored under a method signature/detail, not generic implementation junk.",
+                    object_kind="demoted_item",
+                    object_id=item.name,
+                    evidence_span_ids=item.evidence_span_ids,
+                )
+            )
 
     errors.extend(_cap_warnings(extraction, caps))
     errors.extend(_evidence_span_warnings(extraction))
@@ -471,6 +513,40 @@ def _graph_shape_errors(extraction: PaperExtraction) -> list[ExtractionValidatio
             )
         )
     return errors
+
+
+def _evidence_class_errors(extraction: PaperExtraction) -> list[ExtractionValidationError]:
+    errors: list[ExtractionValidationError] = []
+    for span in extraction.evidence_spans:
+        if span.source_kind == "abstract" and span.evidence_class == "frontmatter":
+            errors.append(
+                _error(
+                    "abstract_evidence_class_frontmatter",
+                    "Abstract spans are high-value prose, not frontmatter.",
+                    object_kind="evidence_span",
+                    object_id=span.span_id,
+                    evidence_span_ids=[span.span_id],
+                )
+            )
+    return errors
+
+
+def _duplicate_id_errors(object_kind: str, ids: list[str]) -> list[ExtractionValidationError]:
+    seen: set[str] = set()
+    duplicate_ids: list[str] = []
+    for object_id in ids:
+        if object_id in seen and object_id not in duplicate_ids:
+            duplicate_ids.append(object_id)
+        seen.add(object_id)
+    return [
+        _error(
+            f"duplicate_{object_kind}_id",
+            f"{object_kind.title()} IDs must be unique.",
+            object_kind=object_kind,
+            object_id=object_id,
+        )
+        for object_id in duplicate_ids
+    ]
 
 
 def _missing_evidence_errors(
@@ -751,7 +827,7 @@ def _overall_system_claim_attached_too_low(claim: object, extraction: PaperExtra
 
 
 def _uses_non_claim_evidence(evidence_span_ids: list[str], evidence_by_id: dict[str, object]) -> bool:
-    noisy_classes = {"component_label", "example_text", "formula_fragment"}
+    noisy_classes = {"component_label", "example_text", "formula_fragment", "frontmatter"}
     return any(str(getattr(evidence_by_id.get(span_id), "evidence_class", "")) in noisy_classes for span_id in evidence_span_ids)
 
 
@@ -834,6 +910,26 @@ def _is_concrete_reusable_method_demoted_for_missing_mechanism(name: str, reason
     if "mechanism sentence" not in normalized_reason:
         return False
     return any(method_name in normalized_name for method_name in _CONCRETE_REUSABLE_METHOD_NAMES)
+
+
+def _is_mechanism_detail_demoted_as_junk(name: str, reason: str, stored_under: str) -> bool:
+    normalized_name = _normalize_identifier(name)
+    normalized_reason = _normalize_identifier(reason)
+    normalized_target = _normalize_identifier(stored_under)
+    mechanism_terms = (
+        "block table",
+        "logical kv block",
+        "physical kv block",
+        "reference count",
+        "all or nothing eviction",
+        "gang scheduling",
+    )
+    if not any(term in normalized_name for term in mechanism_terms):
+        return False
+    junk_terms = ("implementation detail", "component detail", "generic", "junk")
+    if any(term in normalized_reason for term in junk_terms):
+        return True
+    return normalized_target in {"implementation detail", "paper"}
 
 
 def _normalize(value: str) -> str:

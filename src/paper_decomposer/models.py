@@ -218,6 +218,11 @@ def _payload_variants_for_schema(payload: Any, response_schema: type[BaseModel])
     list_field = _single_list_field_name(response_schema)
 
     if isinstance(payload, dict):
+        if len(payload) == 1:
+            only_key, nested = next(iter(payload.items()))
+            if str(only_key).strip() == "":
+                variants.extend(_decoded_payload_variants(nested))
+
         for wrapper_key in _JSON_WRAPPER_KEYS:
             nested = payload.get(wrapper_key)
             if isinstance(nested, (dict, list)):
@@ -249,11 +254,31 @@ def _payload_variants_for_schema(payload: Any, response_schema: type[BaseModel])
     return unique_variants
 
 
+def _decoded_payload_variants(payload: Any) -> list[Any]:
+    if isinstance(payload, (dict, list)):
+        return [payload]
+    if isinstance(payload, str):
+        stripped = payload.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                return [json.loads(stripped)]
+            except json.JSONDecodeError:
+                return []
+    return []
+
+
 def _candidate_rank(payload: Any, response_schema: type[BaseModel]) -> tuple[int, int]:
     if not isinstance(payload, dict):
         return (2, 0)
 
     schema_fields = set(response_schema.model_fields)
+    if len(payload) == 1:
+        only_key, nested = next(iter(payload.items()))
+        if str(only_key).strip() == "" and isinstance(nested, dict):
+            nested_matches = len(schema_fields.intersection(nested))
+            if nested_matches:
+                return (0, -nested_matches)
+
     direct_matches = len(schema_fields.intersection(payload))
     if direct_matches:
         return (0, -direct_matches)

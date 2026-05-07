@@ -90,7 +90,7 @@ def select_evidence_spans(
 
 def select_model_draft_spans(spans: list[EvidenceSpan]) -> list[EvidenceSpan]:
     """Keep evidence classes suitable for method/claim/outcome drafting."""
-    allowed: set[EvidenceClass] = {"prose", "caption", "table", "frontmatter"}
+    allowed: set[EvidenceClass] = {"prose", "caption", "table"}
     return [span for span in spans if span.evidence_class in allowed]
 
 
@@ -246,7 +246,9 @@ def _section_source_kind(section: Section) -> SourceKind:
 
 
 def _evidence_class(text: str, *, source_kind: SourceKind) -> EvidenceClass:
-    if source_kind in {"abstract", "contribution", "conclusion"}:
+    if source_kind == "abstract":
+        return "prose"
+    if _looks_like_frontmatter(text):
         return "frontmatter"
     if source_kind == "caption":
         return "caption"
@@ -331,7 +333,7 @@ def _looks_like_component_label(text: str) -> bool:
     if re.search(r"[.!?]\s*$", cleaned):
         return False
     words = re.findall(r"[A-Za-z0-9]+", cleaned)
-    if len(words) > 6:
+    if len(words) > 8:
         return False
     component_markers = (
         "scheduler",
@@ -344,19 +346,57 @@ def _looks_like_component_label(text: str) -> bool:
         "cache",
         "api",
         "kernel",
+        "allocator",
+        "block table",
+        "logical kv",
+        "physical kv",
+        "key and value",
+        "reference count",
+        "token states",
+        "fragmentation",
+        "reservation",
+        "density",
+        "latency",
     )
     normalized = cleaned.casefold()
-    return any(marker in normalized for marker in component_markers)
+    if any(marker in normalized for marker in component_markers):
+        return True
+    if len(words) <= 6 and re.search(r"\b(prompt|output|input|task|sequence)\b", normalized):
+        return True
+    return False
 
 
 def _looks_like_example_text(text: str) -> bool:
     cleaned = " ".join(text.strip().split())
     normalized = cleaned.casefold()
-    if "four score and seven" in normalized or "brought forth" in normalized:
+    example_fragments = (
+        "four score and seven",
+        "brought forth",
+        "years ago our fathers",
+        "years ago our mothers",
+        "forth query vector",
+        "it was the best",
+    )
+    if any(fragment in normalized for fragment in example_fragments):
         return True
     if re.match(r"^(example|prompt|response|input|output)\s*[:：]", cleaned, flags=re.IGNORECASE):
         return True
     return False
+
+
+def _looks_like_frontmatter(text: str) -> bool:
+    normalized = " ".join(text.strip().casefold().split())
+    if not normalized:
+        return False
+    frontmatter_markers = (
+        "creative commons",
+        "copyright",
+        "isbn",
+        "equal contribution",
+        "this work is licensed",
+        "doi.org",
+    )
+    return any(marker in normalized for marker in frontmatter_markers)
 
 
 def _looks_like_formula_fragment(text: str) -> bool:

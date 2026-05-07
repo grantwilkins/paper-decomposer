@@ -109,7 +109,7 @@ def _extraction() -> PaperExtraction:
         ],
         outcomes=[
             ExtractedOutcome(
-                outcome_id="o1",
+                outcome_id="local:outcome:o1",
                 paper_id="paper-1",
                 metric="throughput",
                 method_ids=["m1"],
@@ -128,7 +128,7 @@ def _extraction() -> PaperExtraction:
                 method_ids=["m1"],
                 setting_ids=["model-1"],
                 problem_ids=["local:problem:kv_fragmentation"],
-                outcome_ids=["o1"],
+                outcome_ids=["local:outcome:o1"],
                 evidence_span_ids=["s1"],
             )
         ],

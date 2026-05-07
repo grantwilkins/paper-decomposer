@@ -59,6 +59,8 @@ Claims may be extracted only after graph nodes exist. If claims exist but no gra
 - Keep visual figure extraction out of scope unless a future explicit feature adds it.
 - Replace remaining vLLM-specific deterministic cleanup rules with field-general graph compression once multi-paper fixtures are available.
 - Implement the global resolver pass that consumes local entity resolution tasks and assigns same_as/variant_of/distinct/uncertain decisions without mutating paper-local extraction records.
+- Add a dedicated `figure_label` evidence class if component labels and plot/table labels need different downstream policies.
+- Add persistence/resolution support for mechanism signature supporting concepts so block tables, reference counts, and logical/physical blocks are queryable without becoming promoted methods.
 
 ## Remaining CLI Work
 

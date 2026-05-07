@@ -111,7 +111,7 @@ def test_invalid_method_nodes_are_demoted_and_references_are_pruned() -> None:
         ],
         outcomes=[
             ExtractedOutcome(
-                outcome_id="outcome-1",
+                outcome_id="local:outcome:outcome_1",
                 paper_id="paper-1",
                 metric="throughput",
                 method_ids=["bad-mechanism"],
@@ -129,7 +129,7 @@ def test_invalid_method_nodes_are_demoted_and_references_are_pruned() -> None:
                 finding="Tiny improves throughput.",
                 method_ids=["bad-section"],
                 setting_ids=["setting-1"],
-                outcome_ids=["outcome-1"],
+                outcome_ids=["local:outcome:outcome_1"],
                 evidence_span_ids=["s1"],
             )
         ],
@@ -421,10 +421,10 @@ def test_graph_quality_repair_tightens_vllm_topology_settings_claims_and_outcome
     assert claim_by_id["c3"].claim_type == "overhead"
     assert all(claim.outcome_ids for claim in repaired.claims)
     assert {outcome.outcome_id for outcome in repaired.outcomes} == {
-        "outcome:c1",
-        "outcome:c2:parallel_sampling",
-        "outcome:c2:beam_search",
-        "outcome:c3",
+        "local:outcome:c1",
+        "local:outcome:c2_parallel_sampling",
+        "local:outcome:c2_beam_search",
+        "local:outcome:c3",
     }
 
     assert validate_extraction(repaired).ok
@@ -603,9 +603,9 @@ def test_cleanup_collapses_vllm_scenario_kernels_and_categories_out_of_main_dag(
     assert claim_by_id["c_kernel"].method_ids == ["local:method:pagedattention"]
     assert claim_by_id["c_kernel"].claim_type == "overhead"
     assert {outcome.outcome_id for outcome in repaired.outcomes} >= {
-        "outcome:c_memory:parallel_sampling",
-        "outcome:c_memory:beam_search",
-        "outcome:c_kernel",
+        "local:outcome:c_memory_parallel_sampling",
+        "local:outcome:c_memory_beam_search",
+        "local:outcome:c_kernel",
     }
     assert {item.name for item in repaired.demoted_items} >= {
         "parallel-sampling prompt KV sharing",
@@ -711,9 +711,93 @@ def test_cleanup_normalizes_ids_dedupes_settings_and_splits_numeric_outcomes() -
     claim = repaired.claims[0]
     assert claim.method_ids == ["local:system:vllm"]
     assert claim.setting_ids.count("local:setting:opt_13b") == 1
-    assert set(claim.outcome_ids) == {"outcome:c1:orca_oracle", "outcome:c1:orca_max"}
+    assert set(claim.outcome_ids) == {"local:outcome:c1_orca_oracle", "local:outcome:c1_orca_max"}
     outcome_by_id = {outcome.outcome_id: outcome for outcome in repaired.outcomes}
-    assert outcome_by_id["outcome:c1:orca_oracle"].delta == "1.7×–2.7×"
-    assert outcome_by_id["outcome:c1:orca_oracle"].comparator == "Orca (Oracle)"
-    assert outcome_by_id["outcome:c1:orca_max"].delta == "2.7×–8×"
-    assert outcome_by_id["outcome:c1:orca_max"].comparator == "Orca (Max)"
+    assert outcome_by_id["local:outcome:c1_orca_oracle"].delta == "1.7×–2.7×"
+    assert outcome_by_id["local:outcome:c1_orca_oracle"].comparator == "Orca (Oracle)"
+    assert outcome_by_id["local:outcome:c1_orca_max"].delta == "2.7×–8×"
+    assert outcome_by_id["local:outcome:c1_orca_max"].comparator == "Orca (Max)"
+
+
+def test_cleanup_normalizes_existing_outcome_ids_and_strips_metric_settings_without_new_rows() -> None:
+    extraction = PaperExtraction(
+        paper_id="paper-1",
+        extraction_run_id="run-1",
+        title="Tiny",
+        evidence_spans=[
+            EvidenceSpan(
+                span_id="s1",
+                paper_id="paper-1",
+                section_title="Abstract",
+                section_kind="abstract",
+                text="TinyAttention maps logical blocks to physical blocks.",
+            )
+        ],
+        nodes=[
+            ExtractedNode(
+                local_node_id="system:Tiny",
+                kind="system",
+                canonical_name="Tiny",
+                description="Tiny serving system.",
+                granularity_rationale="Top-level system.",
+                evidence_span_ids=["s1"],
+            ),
+            ExtractedNode(
+                local_node_id="method:TinyAttention",
+                kind="method",
+                canonical_name="TinyAttention",
+                description="Maps logical blocks.",
+                granularity_rationale="Reusable method.",
+                mechanism_sentence="Given logical blocks, TinyAttention outputs physical blocks by mapping on demand.",
+                evidence_span_ids=["s1"],
+            ),
+        ],
+        edges=[
+            ExtractedEdge(
+                parent_id="system:Tiny",
+                child_id="method:TinyAttention",
+                relation_kind="uses",
+                evidence_span_ids=["s1"],
+            )
+        ],
+        settings=[
+            ExtractedSetting(
+                local_setting_id="local:setting:throughput",
+                kind="metric",
+                canonical_name="Throughput",
+                description="Metric setting from model output.",
+                evidence_span_ids=["s1"],
+            )
+        ],
+        outcomes=[
+            ExtractedOutcome(
+                outcome_id="outcome:c1",
+                paper_id="paper-1",
+                metric="throughput",
+                method_ids=["method:TinyAttention"],
+                setting_ids=["local:setting:throughput"],
+                delta="2x",
+                evidence_span_ids=["s1"],
+            )
+        ],
+        claims=[
+            ExtractedClaim(
+                claim_id="c1",
+                paper_id="paper-1",
+                claim_type="capability",
+                raw_text="TinyAttention maps logical blocks to physical blocks.",
+                finding="TinyAttention maps logical blocks to physical blocks.",
+                method_ids=["method:TinyAttention"],
+                setting_ids=["local:setting:throughput"],
+                outcome_ids=["outcome:c1"],
+                evidence_span_ids=["s1"],
+            )
+        ],
+    )
+
+    repaired = preserve_graph_and_attach_claims(extraction)
+
+    assert {outcome.outcome_id for outcome in repaired.outcomes} == {"local:outcome:c1"}
+    assert repaired.claims[0].outcome_ids == ["local:outcome:c1"]
+    assert repaired.claims[0].setting_ids == []
+    assert validate_extraction(repaired).ok

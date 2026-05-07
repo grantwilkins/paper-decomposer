@@ -55,11 +55,31 @@ def test_evidence_spans_are_stable_and_do_not_fabricate_section_pages() -> None:
     section_spans = [span for span in first if span.artifact_id is None]
     assert section_spans
     assert all(span.page_start is None and span.page_end is None for span in section_spans)
+    abstract = next(span for span in first if span.source_kind == "abstract")
+    assert abstract.evidence_class == "prose"
 
     caption = next(span for span in first if span.artifact_id == "fig-1")
     assert caption.page_start == 4
     assert caption.page_end == 4
     assert caption.source_kind == "caption"
+
+
+def test_abstract_with_frontmatter_markers_still_classifies_as_prose() -> None:
+    document = PaperDocument(
+        metadata=PaperMetadata(title="PagedAttention"),
+        sections=[
+            _section(
+                "Abstract",
+                RhetoricalRole.abstract,
+                "This abstract mentions a DOI but still states the method contribution.",
+            )
+        ],
+    )
+
+    spans = select_evidence_spans(document, paper_id="paper-1")
+
+    assert spans[0].source_kind == "abstract"
+    assert spans[0].evidence_class == "prose"
 
 
 def test_table_captions_obey_table_text_policy() -> None:
@@ -157,6 +177,15 @@ def test_evidence_class_controls_big_model_draft_filtering_without_replacing_sou
             evidence_class="formula_fragment",
             text="y = W x + b",
         ),
+        EvidenceSpan(
+            span_id="m1",
+            paper_id="paper-1",
+            section_title="Metric",
+            section_kind="method",
+            source_kind="paragraph",
+            evidence_class="frontmatter",
+            text="* Equal contribution.",
+        ),
     ]
 
     selected = select_model_draft_spans(spans)
@@ -164,3 +193,32 @@ def test_evidence_class_controls_big_model_draft_filtering_without_replacing_sou
     assert [span.span_id for span in selected] == ["p1"]
     assert spans[1].source_kind == "paragraph"
     assert spans[1].evidence_class == "component_label"
+
+
+def test_evidence_class_marks_diagram_labels_examples_and_frontmatter() -> None:
+    document = PaperDocument(
+        metadata=PaperMetadata(title="PagedAttention"),
+        sections=[
+            Section(
+                title="Method",
+                role=RhetoricalRole.method,
+                body_text=(
+                    "This work is licensed under a Creative Commons Attribution International 4.0 License.\n\n"
+                    "Block Table\n\n"
+                    "CPU Block Allocator\n\n"
+                    "Four score and seven\n\n"
+                    "The runtime maps logical blocks to physical blocks on demand."
+                ),
+                char_count=220,
+            )
+        ],
+    )
+
+    spans = select_evidence_spans(document, paper_id="paper-1")
+    class_by_text = {span.text: span.evidence_class for span in spans}
+
+    assert class_by_text["This work is licensed under a Creative Commons Attribution International 4.0 License."] == "frontmatter"
+    assert class_by_text["Block Table"] == "component_label"
+    assert class_by_text["CPU Block Allocator"] == "component_label"
+    assert class_by_text["Four score and seven"] == "example_text"
+    assert class_by_text["The runtime maps logical blocks to physical blocks on demand."] == "prose"

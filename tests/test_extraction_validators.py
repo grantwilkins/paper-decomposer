@@ -352,7 +352,7 @@ def test_validator_warns_when_outcome_numeric_value_is_not_in_cited_evidence() -
     extraction = _valid_extraction()
     extraction.outcomes.append(
         ExtractedOutcome(
-            outcome_id="o1",
+            outcome_id="local:outcome:o1",
             paper_id="paper-1",
             metric="throughput",
             method_ids=["m1"],
@@ -360,12 +360,92 @@ def test_validator_warns_when_outcome_numeric_value_is_not_in_cited_evidence() -
             evidence_span_ids=["s1"],
         )
     )
-    extraction.claims[0].outcome_ids = ["o1"]
+    extraction.claims[0].outcome_ids = ["local:outcome:o1"]
 
     report = validate_extraction(extraction)
 
     assert report.ok
     assert "numeric_grounding_unverified" in {warning.code for warning in report.warnings}
+
+
+def test_validator_blocks_fallback_outcome_ids_duplicate_outcomes_and_metric_claim_settings() -> None:
+    extraction = _valid_extraction()
+    extraction.settings.append(
+        ExtractedSetting(
+            local_setting_id="local:setting:throughput",
+            kind="metric",
+            canonical_name="Throughput",
+            description="Metric, not an experimental condition.",
+            evidence_span_ids=["s1"],
+        )
+    )
+    extraction.outcomes.extend(
+        [
+            ExtractedOutcome(
+                outcome_id="outcome:local:claim:c0",
+                paper_id="paper-1",
+                metric="throughput",
+                method_ids=["m1"],
+                delta="2x",
+                evidence_span_ids=["s1"],
+            ),
+            ExtractedOutcome(
+                outcome_id="local:outcome:dup",
+                paper_id="paper-1",
+                metric="throughput",
+                method_ids=["m1"],
+                delta="2x",
+                evidence_span_ids=["s1"],
+            ),
+            ExtractedOutcome(
+                outcome_id="local:outcome:dup",
+                paper_id="paper-1",
+                metric="throughput",
+                method_ids=["m1"],
+                delta="3x",
+                evidence_span_ids=["s1"],
+            ),
+        ]
+    )
+    extraction.claims[0].setting_ids = ["local:setting:throughput"]
+    extraction.claims[0].outcome_ids = ["outcome:local:claim:c0"]
+
+    report = validate_extraction(extraction)
+
+    codes = {error.code for error in report.blocking_errors}
+    assert "outcome_id_not_local" in codes
+    assert "claim_outcome_id_not_local" in codes
+    assert "duplicate_outcome_id" in codes
+    assert "claim_uses_metric_setting" in codes
+
+
+def test_validator_blocks_frontmatter_claim_evidence_and_abstract_frontmatter_class() -> None:
+    extraction = _valid_extraction()
+    extraction.evidence_spans[0] = extraction.evidence_spans[0].model_copy(
+        update={"source_kind": "abstract", "evidence_class": "frontmatter"}
+    )
+
+    report = validate_extraction(extraction)
+
+    codes = {error.code for error in report.blocking_errors}
+    assert "abstract_evidence_class_frontmatter" in codes
+    assert "claim_uses_noisy_evidence" in codes
+
+
+def test_validator_blocks_mechanism_concepts_demoted_as_generic_junk() -> None:
+    extraction = _valid_extraction()
+    extraction.demoted_items.append(
+        DemotedItem(
+            name="block table",
+            reason_demoted="Implementation detail.",
+            stored_under="implementation_detail",
+            evidence_span_ids=["s1"],
+        )
+    )
+
+    report = validate_extraction(extraction)
+
+    assert "mechanism_detail_demoted_as_junk" in {error.code for error in report.blocking_errors}
 
 
 def test_validator_warns_for_graph_quality_issues_before_db_write() -> None:
@@ -435,12 +515,12 @@ def test_validator_warns_for_graph_quality_issues_before_db_write() -> None:
         finding="vLLM can sustain 2x higher request rates than Orca.",
         method_ids=["m1"],
         setting_ids=["bucket"],
-        outcome_ids=["o1"],
+        outcome_ids=["local:outcome:o1"],
         evidence_span_ids=["s3"],
     )
     extraction.outcomes.append(
         ExtractedOutcome(
-            outcome_id="o1",
+            outcome_id="local:outcome:o1",
             paper_id="paper-1",
             metric="request rate",
             method_ids=["m1"],
@@ -494,7 +574,7 @@ def test_validator_blocks_nonexistent_claim_outcome_setting_edge_and_method_sett
     )
     extraction.outcomes.append(
         ExtractedOutcome(
-            outcome_id="o1",
+            outcome_id="local:outcome:o1",
             paper_id="paper-1",
             metric="throughput",
             method_ids=["missing"],
@@ -527,7 +607,7 @@ def test_validator_blocks_claim_and_outcome_from_wrong_paper() -> None:
     extraction = _valid_extraction()
     extraction.outcomes.append(
         ExtractedOutcome(
-            outcome_id="o1",
+            outcome_id="local:outcome:o1",
             paper_id="other-paper",
             metric="throughput",
             method_ids=["m1"],

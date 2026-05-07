@@ -244,8 +244,10 @@ def preserve_graph_and_attach_claims(
     extraction = _repair_setting_taxonomy(extraction)
     extraction = _collapse_non_main_method_nodes(extraction)
     extraction = _demote_component_details(extraction)
+    extraction = _drop_promoted_demotions(extraction)
     extraction = extraction.model_copy(update={"claims": [_repair_claim(claim, extraction.graph) for claim in extraction.claims]})
     extraction = _normalize_method_family_ids(extraction)
+    extraction = _normalize_outcome_ids(extraction)
     return _materialize_claim_outcomes(extraction)
 
 
@@ -885,9 +887,11 @@ def _retarget_overall_system_claim(claim: ExtractedClaim, graph: PaperGraph) -> 
 
 def _retarget_claim_settings(claim: ExtractedClaim, graph: PaperGraph) -> ExtractedClaim:
     text = _normalize_identifier(f"{claim.raw_text} {claim.finding}")
+    setting_by_id = {setting.local_setting_id: setting for setting in graph.settings}
     matching_ids = [
         setting.local_setting_id
         for setting in graph.settings
+        if setting.kind != "metric"
         if _setting_matches_claim(setting, text)
     ]
     if not matching_ids and _claim_mentions_single_system(claim, graph):
@@ -898,7 +902,11 @@ def _retarget_claim_settings(claim: ExtractedClaim, graph: PaperGraph) -> Extrac
         ]
     if not matching_ids:
         return claim
-    merged = [setting_id for setting_id in claim.setting_ids if setting_id in {setting.local_setting_id for setting in graph.settings}]
+    merged = [
+        setting_id
+        for setting_id in claim.setting_ids
+        if setting_id in setting_by_id and setting_by_id[setting_id].kind != "metric"
+    ]
     for setting_id in matching_ids:
         if setting_id not in merged:
             merged.append(setting_id)
@@ -907,13 +915,21 @@ def _retarget_claim_settings(claim: ExtractedClaim, graph: PaperGraph) -> Extrac
 
 def _materialize_claim_outcomes(extraction: PaperExtraction) -> PaperExtraction:
     outcomes_by_id = {outcome.outcome_id: outcome for outcome in extraction.outcomes}
+    setting_by_id = {setting.local_setting_id: setting for setting in extraction.settings}
     claims: list[ExtractedClaim] = []
     for claim in extraction.claims:
         outcome_specs = _claim_outcome_specs(claim)
+        claim_setting_ids = _non_metric_setting_ids(claim.setting_ids, setting_by_id)
         if not outcome_specs:
-            claims.append(claim)
+            claims.append(
+                _prune_claim_outcome_ids(claim, outcomes_by_id).model_copy(update={"setting_ids": claim_setting_ids})
+            )
             continue
-        outcome_ids = list(claim.outcome_ids)
+        outcome_ids = [
+            outcome_id
+            for outcome_id in claim.outcome_ids
+            if outcome_id in outcomes_by_id and _is_local_outcome_id(outcome_id)
+        ]
         for spec in outcome_specs:
             outcome_id = str(spec["outcome_id"])
             if outcome_id not in outcomes_by_id:
@@ -922,7 +938,7 @@ def _materialize_claim_outcomes(extraction: PaperExtraction) -> PaperExtraction:
                     paper_id=extraction.paper_id,
                     metric=str(spec["metric"]),
                     method_ids=claim.method_ids,
-                    setting_ids=claim.setting_ids,
+                    setting_ids=claim_setting_ids,
                     value=spec.get("value"),
                     delta=spec.get("delta"),
                     baseline=spec.get("baseline"),
@@ -932,8 +948,70 @@ def _materialize_claim_outcomes(extraction: PaperExtraction) -> PaperExtraction:
                 )
             if outcome_id not in outcome_ids:
                 outcome_ids.append(outcome_id)
-        claims.append(claim.model_copy(update={"outcome_ids": outcome_ids}))
+        claims.append(claim.model_copy(update={"setting_ids": claim_setting_ids, "outcome_ids": outcome_ids}))
     return extraction.model_copy(update={"claims": claims, "outcomes": list(outcomes_by_id.values())})
+
+
+def _non_metric_setting_ids(
+    setting_ids: list[str],
+    setting_by_id: dict[str, ExtractedSetting],
+) -> list[str]:
+    return [
+        setting_id
+        for setting_id in setting_ids
+        if setting_by_id.get(setting_id) is None or setting_by_id[setting_id].kind != "metric"
+    ]
+
+
+def _normalize_outcome_ids(extraction: PaperExtraction) -> PaperExtraction:
+    replacements: dict[str, str] = {}
+    outcomes_by_id: dict[str, ExtractedOutcome] = {}
+    for outcome in extraction.outcomes:
+        normalized_id = _normalized_outcome_id(outcome.outcome_id)
+        if normalized_id != outcome.outcome_id:
+            replacements[outcome.outcome_id] = normalized_id
+        normalized = outcome.model_copy(update={"outcome_id": normalized_id})
+        if normalized_id in outcomes_by_id:
+            outcomes_by_id[normalized_id] = _merge_outcomes(outcomes_by_id[normalized_id], normalized)
+        else:
+            outcomes_by_id[normalized_id] = normalized
+
+    if not replacements:
+        return extraction
+
+    claims = [
+        claim.model_copy(
+            update={"outcome_ids": _dedupe_ids([replacements.get(outcome_id, outcome_id) for outcome_id in claim.outcome_ids])}
+        )
+        for claim in extraction.claims
+    ]
+    return extraction.model_copy(update={"outcomes": list(outcomes_by_id.values()), "claims": claims})
+
+
+def _normalized_outcome_id(outcome_id: str) -> str:
+    if outcome_id.startswith("local:outcome:"):
+        return outcome_id
+    if outcome_id.startswith("outcome:local:claim:"):
+        return f"local:outcome:{_slug(outcome_id.removeprefix('outcome:local:claim:'))}"
+    if outcome_id.startswith("outcome:"):
+        return f"local:outcome:{_slug(outcome_id.removeprefix('outcome:'))}"
+    return f"local:outcome:{_slug(outcome_id)}"
+
+
+def _merge_outcomes(left: ExtractedOutcome, right: ExtractedOutcome) -> ExtractedOutcome:
+    return left.model_copy(
+        update={
+            "method_ids": _dedupe_ids([*left.method_ids, *right.method_ids]),
+            "setting_ids": _dedupe_ids([*left.setting_ids, *right.setting_ids]),
+            "value": left.value or right.value,
+            "delta": left.delta or right.delta,
+            "baseline": left.baseline or right.baseline,
+            "comparator": left.comparator or right.comparator,
+            "units": left.units or right.units,
+            "evidence_span_ids": _dedupe_ids([*left.evidence_span_ids, *right.evidence_span_ids]),
+            "confidence": left.confidence if left.confidence is not None else right.confidence,
+        }
+    )
 
 
 def _claim_outcome_specs(claim: ExtractedClaim) -> list[dict[str, str | None]]:
@@ -952,7 +1030,7 @@ def _claim_outcome_specs(claim: ExtractedClaim) -> list[dict[str, str | None]]:
         return []
     return [
         {
-            "outcome_id": f"outcome:{claim.claim_id}",
+            "outcome_id": _local_outcome_id(claim.claim_id),
             "metric": metric,
             "delta": delta,
             "value": None,
@@ -998,7 +1076,7 @@ def _outcome_spec(
     comparator: str,
 ) -> dict[str, str | None]:
     return {
-        "outcome_id": f"outcome:{claim.claim_id}:{suffix}",
+        "outcome_id": _local_outcome_id(claim.claim_id, suffix=suffix),
         "metric": metric,
         "delta": delta,
         "value": None,
@@ -1009,6 +1087,32 @@ def _outcome_spec(
 
 def _populate_claim_structured_fields(claim: ExtractedClaim) -> ExtractedClaim:
     return claim
+
+
+def _prune_claim_outcome_ids(
+    claim: ExtractedClaim,
+    outcomes_by_id: dict[str, ExtractedOutcome],
+) -> ExtractedClaim:
+    outcome_ids = [
+        outcome_id
+        for outcome_id in claim.outcome_ids
+        if outcome_id in outcomes_by_id and _is_local_outcome_id(outcome_id)
+    ]
+    if outcome_ids == claim.outcome_ids:
+        return claim
+    return claim.model_copy(update={"outcome_ids": outcome_ids})
+
+
+def _local_outcome_id(claim_id: str, *, suffix: str | None = None) -> str:
+    normalized_claim = claim_id.removeprefix("local:claim:").removeprefix("claim:")
+    base = f"local:outcome:{_slug(normalized_claim)}"
+    if suffix is None:
+        return base
+    return f"{base}_{_slug(suffix)}"
+
+
+def _is_local_outcome_id(outcome_id: str) -> bool:
+    return outcome_id.startswith("local:outcome:")
 
 
 def _claim_text(claim: ExtractedClaim) -> str:
@@ -1412,6 +1516,17 @@ def _dedupe_demotions(items: list[DemotedItem]) -> list[DemotedItem]:
         seen.add(key)
         deduped.append(item)
     return deduped
+
+
+def _drop_promoted_demotions(extraction: PaperExtraction) -> PaperExtraction:
+    promoted_names = {_normalize_identifier(node.canonical_name) for node in extraction.nodes}
+    promoted_names.update(_normalize_identifier(setting.canonical_name) for setting in extraction.settings)
+    demoted_items = [
+        item
+        for item in extraction.demoted_items
+        if _normalize_identifier(item.name) not in promoted_names
+    ]
+    return extraction.model_copy(update={"demoted_items": demoted_items})
 
 
 def _component_storage_target(graph: PaperGraph, name: str) -> str:

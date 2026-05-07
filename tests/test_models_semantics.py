@@ -483,6 +483,26 @@ def test_call_model_prefers_schema_shaped_dict_over_earlier_valid_list(
     assert result.claims == [2, 3]
 
 
+def test_call_model_unwraps_deepseek_empty_key_structured_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _test_config(max_retries=0)
+    completions = _FakeCompletions([_fake_response('{"": {"answer": 4}}', 12, 7)])
+    monkeypatch.setattr(model_client, "_get_client", lambda: _FakeClient(completions))
+
+    result = asyncio.run(
+        model_client.call_model(
+            "heavy",
+            [{"role": "user", "content": "2+2"}],
+            response_schema=AnswerOutput,
+            config=config,
+        )
+    )
+
+    assert isinstance(result, AnswerOutput)
+    assert result.answer == 4
+
+
 def test_call_model_structured_output_raises_clear_error_on_invalid_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

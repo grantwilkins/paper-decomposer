@@ -64,7 +64,8 @@ Single-pass compact extraction:
 - Prefer 5-8 compact claims that state propositions rather than table rows.
 - Do not emit method_category nodes. Put useful coarse labels in category_tags.
 - For systems and methods, include a mechanism_signature with inputs, outputs, operative_move,
-  problem, preconditions, state_modified, failure_modes_or_tradeoffs, and typical_settings when grounded.
+  problem, preconditions, state_modified, failure_modes_or_tradeoffs, typical_settings, and
+  supporting_concepts when grounded.
 - Do not promote GPU kernels, helper APIs, schedulers, workers, or frontend details as methods
   unless they are central paper contributions.
 - Before returning JSON, internally check that every referenced method_id, setting_id,

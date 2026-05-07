@@ -113,6 +113,7 @@ class MechanismSignature(BaseModel):
     state_modified: list[str] = Field(default_factory=list)
     failure_modes_or_tradeoffs: list[str] = Field(default_factory=list)
     typical_settings: list[str] = Field(default_factory=list)
+    supporting_concepts: list[str] = Field(default_factory=list)
 
     @field_validator("operative_move")
     @classmethod
