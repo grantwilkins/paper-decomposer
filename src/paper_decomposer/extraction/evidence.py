@@ -5,7 +5,7 @@ import re
 
 from paper_decomposer.schema import EvidenceArtifact, PaperDocument, RhetoricalRole, Section
 
-from .contracts import EvidenceSpan, SourceKind
+from .contracts import EvidenceSpan, ExtractionValidationError, PaperExtraction, SourceKind
 
 _HIGH_SIGNAL_ROLES = {
     RhetoricalRole.abstract,
@@ -83,10 +83,145 @@ def select_evidence_spans(
     return spans
 
 
+def select_targeted_repair_spans(
+    extraction: PaperExtraction,
+    validation_errors: list[ExtractionValidationError],
+    *,
+    max_chars: int = 16_000,
+) -> list[EvidenceSpan]:
+    """Select the smallest useful evidence packet for repair prompts."""
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive.")
+
+    span_by_id = {span.span_id: span for span in extraction.evidence_spans}
+    candidate_ids: list[str] = []
+
+    for error in validation_errors:
+        for span_id in error.evidence_span_ids:
+            if span_id in span_by_id:
+                candidate_ids.append(span_id)
+        candidate_ids.extend(_object_evidence_span_ids(extraction, error.object_kind, error.object_id))
+
+    if _needs_graph_rebuild_context(validation_errors) or not candidate_ids:
+        candidate_ids.extend(_graph_rebuild_context_span_ids(extraction.evidence_spans))
+
+    if not candidate_ids:
+        candidate_ids.extend(span.span_id for span in extraction.evidence_spans)
+
+    selected: list[EvidenceSpan] = []
+    seen: set[str] = set()
+    used_chars = 0
+    for span_id in candidate_ids:
+        if span_id in seen:
+            continue
+        span = span_by_id.get(span_id)
+        if span is None:
+            continue
+        span_chars = len(span.text)
+        if selected and used_chars + span_chars > max_chars:
+            continue
+        selected.append(span)
+        seen.add(span_id)
+        used_chars += span_chars
+        if used_chars >= max_chars:
+            break
+
+    return selected or extraction.evidence_spans[:1]
+
+
 def _is_high_signal_section(section: Section) -> bool:
     if section.role in _HIGH_SIGNAL_ROLES:
         return True
     return bool(_HIGH_SIGNAL_TITLE_PATTERN.search(section.title))
+
+
+def _object_evidence_span_ids(
+    extraction: PaperExtraction,
+    object_kind: str | None,
+    object_id: str | None,
+) -> list[str]:
+    if object_kind is None or object_id is None:
+        return []
+
+    if object_kind == "node":
+        return [span_id for node in extraction.nodes if node.local_node_id == object_id for span_id in node.evidence_span_ids]
+    if object_kind == "setting":
+        return [
+            span_id
+            for setting in extraction.settings
+            if setting.local_setting_id == object_id
+            for span_id in setting.evidence_span_ids
+        ]
+    if object_kind == "outcome":
+        return [
+            span_id
+            for outcome in extraction.outcomes
+            if outcome.outcome_id == object_id
+            for span_id in outcome.evidence_span_ids
+        ]
+    if object_kind == "claim":
+        return [span_id for claim in extraction.claims if claim.claim_id == object_id for span_id in claim.evidence_span_ids]
+    if object_kind == "demoted_item":
+        return [
+            span_id
+            for item in extraction.demoted_items
+            if item.name == object_id
+            for span_id in item.evidence_span_ids
+        ]
+    if object_kind in {"edge", "setting_edge", "method_setting_link"}:
+        return _edge_evidence_span_ids(extraction, object_kind, object_id)
+    return []
+
+
+def _edge_evidence_span_ids(extraction: PaperExtraction, object_kind: str, object_id: str) -> list[str]:
+    if "->" not in object_id:
+        return []
+    parent_id, child_id = object_id.split("->", 1)
+    if object_kind == "edge":
+        return [
+            span_id
+            for edge in extraction.edges
+            if edge.parent_id == parent_id and edge.child_id == child_id
+            for span_id in edge.evidence_span_ids
+        ]
+    if object_kind == "setting_edge":
+        return [
+            span_id
+            for edge in extraction.setting_edges
+            if edge.parent_id == parent_id and edge.child_id == child_id
+            for span_id in edge.evidence_span_ids
+        ]
+    if object_kind == "method_setting_link":
+        return [
+            span_id
+            for link in extraction.method_setting_links
+            if link.method_id == parent_id and link.setting_id == child_id
+            for span_id in link.evidence_span_ids
+        ]
+    return []
+
+
+def _needs_graph_rebuild_context(validation_errors: list[ExtractionValidationError]) -> bool:
+    graph_rebuild_codes = {
+        "extraction_graph_missing",
+        "no_graph_nodes",
+        "graph_references_without_nodes",
+        "system_node_missing",
+        "system_method_edge_missing",
+        "method_edges_missing",
+        "claims_missing",
+    }
+    return any(error.code in graph_rebuild_codes for error in validation_errors)
+
+
+def _graph_rebuild_context_span_ids(spans: list[EvidenceSpan]) -> list[str]:
+    selected = [
+        span.span_id
+        for span in spans
+        if span.source_kind in {"abstract", "contribution"}
+        or span.section_kind in {"abstract", "introduction", "method", "theory"}
+    ]
+    return selected or [span.span_id for span in spans[:4]]
 
 
 def _section_source_kind(section: Section) -> SourceKind:
@@ -162,4 +297,4 @@ def _is_isolated_visual_fragment(text: str) -> bool:
     return False
 
 
-__all__ = ["select_evidence_spans"]
+__all__ = ["select_evidence_spans", "select_targeted_repair_spans"]

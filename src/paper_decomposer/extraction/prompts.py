@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .contracts import EvidenceSpan, ExtractionValidationError
+from .contracts import EvidenceSpan, ExtractionCaps, ExtractionValidationError
 
 RULES = (
     "Return JSON only. The extractor is graph-first: build the paper-local method/settings graph before claims. "
@@ -46,6 +46,23 @@ Graph calibration:
   grounded objects.
 """.strip()
 
+BIG_MODEL_COMPACT_RULES = """
+Single-pass compact extraction:
+- Use the supplied evidence as one paper-local draft. Do not summarize the paper.
+- Keep claims compact. Outcomes carry numeric rows. Settings carry experimental conditions.
+- Do not make one claim per numeric row; link compact claims to explicit outcome rows instead.
+- Preserve numeric text exactly in outcomes, including ranges, multipliers, percentages, and units.
+- Emit at most one system node unless the paper truly introduces multiple systems.
+- Prefer 6-10 reusable method nodes for a full systems paper.
+- Prefer 5-10 settings covering tasks, datasets, workloads, hardware, model artifacts, and metrics.
+- Prefer 5-8 compact claims that state propositions rather than table rows.
+- Do not emit method_category nodes. Put useful coarse labels in category_tags.
+- Do not promote GPU kernels, helper APIs, schedulers, workers, or frontend details as methods
+  unless they are central paper contributions.
+- Before returning JSON, internally check that every referenced method_id, setting_id,
+  outcome_id, and evidence span ID resolves. Do not emit validation notes as an output field.
+""".strip()
+
 
 def frontmatter_prompt(spans: list[EvidenceSpan]) -> list[dict[str, str]]:
     return [
@@ -78,6 +95,36 @@ def claims_outcomes_prompt(spans: list[EvidenceSpan], graph_json: str) -> list[d
             "content": "Extract grounded claims and explicit outcomes against the supplied graph. Preserve numeric text exactly. "
             "Do not emit floating claims; every claim must link to method_ids, setting_ids, or outcome_ids.\n\n"
             f"Graph:\n{graph_json}\n\nEvidence:\n{_format_spans(spans)}",
+        },
+    ]
+
+
+def big_model_compact_prompt(spans: list[EvidenceSpan], caps: ExtractionCaps) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": f"{_system_prompt()}\n\n{BIG_MODEL_COMPACT_RULES}"},
+        {
+            "role": "user",
+            "content": "Produce a complete compact ExtractionDraft JSON in one pass from the supplied evidence. "
+            "Return graph.systems, graph.methods, graph.method_edges, graph.settings, graph.setting_edges, "
+            "graph.method_setting_links, outcomes, claims, and demoted_items. "
+            "The final JSON must match the schema exactly; do not add validation_notes or commentary.\n\n"
+            "Output caps:\n"
+            f"- system nodes <= {caps.max_system_nodes}\n"
+            f"- method nodes <= {caps.max_method_nodes}\n"
+            f"- settings <= {caps.max_setting_nodes}\n"
+            f"- compact claims <= {caps.max_claims}\n"
+            f"- outcomes <= {caps.max_outcomes}\n"
+            f"- demoted items <= {caps.max_demoted_items}\n\n"
+            "Validation checklist to satisfy before returning:\n"
+            "- every referenced method_id exists in graph.systems or graph.methods\n"
+            "- every referenced setting_id exists in graph.settings\n"
+            "- every referenced outcome_id exists in outcomes\n"
+            "- every numeric value appears exactly in cited evidence when possible\n"
+            "- claim_type matches the metric and finding\n"
+            "- basic-sampling claims are not tagged with parallel_sampling settings\n"
+            "- method IDs use one namespace and never mix method: prefixes with meth_ IDs\n"
+            "- figure-label spans are not used as claim evidence unless the caption/table text is explicit\n\n"
+            f"Evidence:\n{_format_spans(spans, max_span_chars=2200)}",
         },
     ]
 
@@ -167,7 +214,9 @@ def _system_prompt() -> str:
 
 __all__ = [
     "CALIBRATION",
+    "BIG_MODEL_COMPACT_RULES",
     "RULES",
+    "big_model_compact_prompt",
     "claims_outcomes_prompt",
     "cleanup_prompt",
     "compression_prompt",

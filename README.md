@@ -61,6 +61,15 @@ python -m paper_decomposer path/to/paper.pdf --dry-run
 python -m paper_decomposer path/to/paper.pdf --extract --output-json extraction.json
 ```
 
+The experiment branch defaults extraction to a one-pass compact big-model draft
+using `models.medium` (`MiniMaxAI/MiniMax-M2.7`) plus deterministic validation
+and at most one targeted repair. To compare the configured big-model candidates
+(`medium` then `heavy`) on one PDF:
+
+```bash
+python -m paper_decomposer path/to/paper.pdf --experimental-big-model-compare --output-json comparison.json
+```
+
 **Apply the database schema:**
 
 ```bash

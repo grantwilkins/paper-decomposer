@@ -12,7 +12,7 @@ import yaml
 
 from .models import get_cost_tracker, reset_cost_tracker
 from .pdf_parser import parse_pdf
-from .pipeline import extract_paper, ingest_paper
+from .pipeline import compare_paper_extractions, extract_paper, ingest_paper
 
 console = Console()
 
@@ -60,10 +60,36 @@ def _run_single(
     config_path: str,
     dry_run: bool,
     extract: bool,
+    compare_big_models: bool,
     output_json: Path | None,
 ) -> None:
-    if dry_run and not extract:
+    if dry_run and not extract and not compare_big_models:
         _print_section_summary(pdf_path, config_path)
+        return
+
+    if compare_big_models:
+        comparison = asyncio.run(compare_paper_extractions(str(pdf_path), config_path))
+        payload = comparison.model_dump(mode="json")
+        output_text = json.dumps(payload, indent=2, sort_keys=True)
+        if output_json is not None:
+            output_json.write_text(output_text + "\n", encoding="utf-8")
+            console.print(f"[green]Wrote big-model comparison JSON[/green] {output_json}")
+        else:
+            console.print(output_text)
+        for result in comparison.results:
+            extraction = result.extraction
+            counts = (
+                f"nodes={len(extraction.nodes)} settings={len(extraction.settings)} "
+                f"claims={len(extraction.claims)} outcomes={len(extraction.outcomes)}"
+                if extraction is not None
+                else "no extraction"
+            )
+            console.print(
+                "[green]Compared[/green] "
+                f"{result.candidate_tier} {result.model or ''} | ok={result.ok} "
+                f"repair={result.used_repair} | {counts} "
+                f"cost=${float(result.cost.get('total_cost_usd', 0.0)):.6f}"
+            )
         return
 
     if extract:
@@ -101,7 +127,7 @@ def _run_batch(directory: Path, config_path: str, dry_run: bool, extract: bool) 
     failures = 0
     for pdf in pdfs:
         try:
-            _run_single(pdf, config_path, dry_run, extract, output_json=None)
+            _run_single(pdf, config_path, dry_run, extract, compare_big_models=False, output_json=None)
         except Exception as exc:
             failures += 1
             console.print(f"[red]Failed[/red] {pdf.name}: {exc}")
@@ -120,6 +146,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--config", default="config.yaml", help="Path to config YAML")
     parser.add_argument("--dry-run", action="store_true", help="Parse PDFs and print sections only")
     parser.add_argument("--extract", action="store_true", help="Run validated extraction after parsing")
+    parser.add_argument(
+        "--experimental-big-model-compare",
+        action="store_true",
+        help="Compare configured MiniMax/DeepSeek-style big-model draft extraction candidates",
+    )
     parser.add_argument("--output-json", type=Path, help="Write extraction JSON for a single PDF")
     args = parser.parse_args(argv)
 
@@ -132,12 +163,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         if input_path.suffix.lower() != ".pdf":
             console.print(f"[red]Input file is not a PDF:[/red] {input_path}")
             return 1
-        _run_single(input_path, args.config, args.dry_run, args.extract, args.output_json)
+        _run_single(
+            input_path,
+            args.config,
+            args.dry_run,
+            args.extract,
+            args.experimental_big_model_compare,
+            args.output_json,
+        )
         return 0
 
     if input_path.is_dir():
         if args.output_json is not None:
             console.print("[red]--output-json is only supported for a single PDF.[/red]")
+            return 1
+        if args.experimental_big_model_compare:
+            console.print("[red]--experimental-big-model-compare is only supported for a single PDF.[/red]")
             return 1
         return _run_batch(input_path, args.config, args.dry_run, args.extract)
 

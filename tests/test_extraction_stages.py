@@ -12,6 +12,7 @@ Plausible wrong implementations:
 - Route normal compression or cheap repair through the large adjudication tier.
 - Route final cleanup through the normal draft tier instead of the adjudication tier.
 - Build stage prompts without evidence span IDs, making grounding impossible.
+- Ignore the explicit big-model comparison tier and fall back to default_model_tier.
 """
 
 from __future__ import annotations
@@ -22,7 +23,13 @@ from typing import Any
 
 import pytest
 
-from paper_decomposer.extraction.contracts import EvidenceSpan, ExtractionValidationError, PaperExtraction, ValidationSeverity
+from paper_decomposer.extraction.contracts import (
+    EvidenceSpan,
+    ExtractionCaps,
+    ExtractionValidationError,
+    PaperExtraction,
+    ValidationSeverity,
+)
 from paper_decomposer.extraction.stages import (
     ClaimsOutcomesDraft,
     ExtractionDraft,
@@ -30,6 +37,7 @@ from paper_decomposer.extraction.stages import (
     MethodGraphDraft,
     cleanup_paper_extraction,
     compress_paper_extraction,
+    extract_big_model_draft,
     extract_frontmatter_sketch,
     repair_paper_extraction,
 )
@@ -86,6 +94,49 @@ def test_compression_uses_default_tier_not_large_adjudication(monkeypatch: pytes
 
     assert calls[0]["tier"] == "medium"
     assert calls[0]["response_schema"] is ExtractionDraft
+
+
+def test_big_model_draft_uses_explicit_tier_and_full_evidence_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_call_model(tier: str, messages: list[dict[str, str]], response_schema: type, config: Any) -> Any:
+        calls.append({"tier": tier, "messages": messages, "response_schema": response_schema})
+        return ExtractionDraft()
+
+    monkeypatch.setattr("paper_decomposer.extraction.stages.call_model", fake_call_model)
+    config = SimpleNamespace(
+        pipeline=SimpleNamespace(
+            extraction={
+                "default_model_tier": "small",
+                "big_model_draft_tier": "medium",
+            }
+        )
+    )
+    spans = [
+        EvidenceSpan(
+            span_id="s1",
+            paper_id="paper-1",
+            section_title="Abstract",
+            section_kind="abstract",
+            text="Tiny System introduces TinyAttention.",
+            source_kind="abstract",
+        ),
+        EvidenceSpan(
+            span_id="s2",
+            paper_id="paper-1",
+            section_title="Evaluation",
+            section_kind="evaluation",
+            text="Tiny System improves request rate by 2x.",
+        ),
+    ]
+
+    asyncio.run(extract_big_model_draft(spans, config=config, tier="heavy", caps=ExtractionCaps(max_claims=8)))
+
+    assert calls[0]["tier"] == "heavy"
+    assert calls[0]["response_schema"] is ExtractionDraft
+    assert "[s1]" in calls[0]["messages"][1]["content"]
+    assert "[s2]" in calls[0]["messages"][1]["content"]
+    assert "compact claims <= 8" in calls[0]["messages"][1]["content"]
 
 
 def test_repair_uses_repair_tier_not_large_adjudication(monkeypatch: pytest.MonkeyPatch) -> None:

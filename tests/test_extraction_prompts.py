@@ -11,12 +11,13 @@ Plausible wrong implementations:
 - Demote concrete KV-cache mechanisms when only the mechanism sentence is missing.
 - Attach system-level throughput claims to the wrong supporting mechanism.
 - Ask for final candidates instead of promoted graph fields.
+- Let the big-model path emit expansive row-level claims instead of compact claims plus outcomes.
 """
 
 from __future__ import annotations
 
-from paper_decomposer.extraction.contracts import EvidenceSpan
-from paper_decomposer.extraction.prompts import compression_prompt, method_graph_prompt
+from paper_decomposer.extraction.contracts import EvidenceSpan, ExtractionCaps
+from paper_decomposer.extraction.prompts import big_model_compact_prompt, compression_prompt, method_graph_prompt
 
 
 def _span() -> EvidenceSpan:
@@ -61,3 +62,19 @@ def test_prompts_demote_applications_and_implementation_support() -> None:
     assert "fill metric, delta/value, baseline, and comparator" in system_content
     assert "graph.systems" in user_content
     assert "Do not include final candidates" in user_content
+
+
+def test_big_model_prompt_enforces_compact_claims_and_resolved_ids() -> None:
+    messages = big_model_compact_prompt([_span()], ExtractionCaps(max_system_nodes=1, max_method_nodes=10, max_claims=8))
+    system_content = messages[0]["content"]
+    user_content = messages[1]["content"]
+
+    assert "Single-pass compact extraction" in system_content
+    assert "Keep claims compact" in system_content
+    assert "Outcomes carry numeric rows" in system_content
+    assert "Do not emit validation notes" in system_content
+    assert "system nodes <= 1" in user_content
+    assert "method nodes <= 10" in user_content
+    assert "compact claims <= 8" in user_content
+    assert "every referenced outcome_id exists" in user_content
+    assert "[s1]" in user_content

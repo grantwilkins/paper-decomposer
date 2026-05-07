@@ -45,6 +45,9 @@ Claims may be extracted only after graph nodes exist. If claims exist but no gra
 
 ## Remaining Extraction Work
 
+- Add fixture smoke expectations for experimental DeepSeek-vs-MiniMax extraction on vLLM and ORCA, checking graph shape rather than exact JSON.
+- Define deterministic comparison scoring for candidate extractions: blocking errors, warning taxonomy, grounded graph completeness, and attached claim/outcome counts.
+- Decide whether future DB persistence should store both experimental candidate outputs or only a selected extraction.
 - Preserve grounded settings, claims, and explicit outcomes through compression and repair; the vLLM fixture should keep model artifacts, workloads, hardware, throughput claims, and memory claims when they appear in selected evidence.
 - Add fixture smoke expectations that vLLM extraction retains the system -> PagedAttention -> reusable KV-cache mechanism shape, demotes implementation details, and preserves at least one grounded performance or memory claim.
 - Narrow final heavy cleanup into targeted adjudication packets once the validator failure taxonomy is stable.

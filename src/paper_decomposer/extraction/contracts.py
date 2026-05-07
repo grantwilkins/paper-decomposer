@@ -320,7 +320,30 @@ class ExtractionValidationReport(BaseModel):
         return not self.blocking_errors
 
 
+class BigModelExtractionResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_tier: str
+    model: str | None = None
+    ok: bool
+    used_repair: bool = False
+    validation_report: ExtractionValidationReport | None = None
+    cost: dict[str, float | int] = Field(default_factory=dict)
+    extraction: PaperExtraction | None = None
+    error: str | None = None
+
+
+class BigModelComparison(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    paper_id: str
+    title: str
+    results: list[BigModelExtractionResult] = Field(default_factory=list)
+
+
 __all__ = [
+    "BigModelComparison",
+    "BigModelExtractionResult",
     "CandidateNode",
     "ClaimType",
     "DemotedItem",

@@ -17,11 +17,13 @@ from .contracts import (
     ExtractedNode,
     ExtractedOutcome,
     ExtractedSetting,
+    ExtractionCaps,
     ExtractionValidationError,
     PaperGraph,
     PaperExtraction,
 )
 from .prompts import (
+    big_model_compact_prompt,
     claims_outcomes_prompt,
     cleanup_prompt,
     compression_prompt,
@@ -147,6 +149,21 @@ async def extract_claims_and_outcomes(
     )
 
 
+async def extract_big_model_draft(
+    spans: list[EvidenceSpan],
+    *,
+    config: Any,
+    tier: ModelTier | None = None,
+    caps: ExtractionCaps | None = None,
+) -> ExtractionDraft:
+    return await call_model(
+        tier or _big_model_draft_tier(config),
+        big_model_compact_prompt(spans, caps or ExtractionCaps()),
+        response_schema=ExtractionDraft,
+        config=config,
+    )
+
+
 async def compress_paper_extraction(
     graph: MethodGraphDraft,
     claims: ClaimsOutcomesDraft,
@@ -166,9 +183,10 @@ async def repair_paper_extraction(
     validation_errors: list[ExtractionValidationError],
     *,
     config: Any,
+    tier: ModelTier | None = None,
 ) -> ExtractionDraft:
     return await call_model(
-        _repair_model_tier(config),
+        tier or _repair_model_tier(config),
         repair_prompt(extraction.model_dump_json(), validation_errors, extraction.evidence_spans),
         response_schema=ExtractionDraft,
         config=config,
@@ -203,6 +221,10 @@ def _repair_model_tier(config: Any) -> ModelTier:
 
 def _adjudication_model_tier(config: Any) -> ModelTier:
     return _model_tier_from_config(config, key="adjudication_model_tier", default=_default_model_tier(config))
+
+
+def _big_model_draft_tier(config: Any) -> ModelTier:
+    return _model_tier_from_config(config, key="big_model_draft_tier", default=_default_model_tier(config))
 
 
 def _model_tier_from_config(config: Any, *, key: str, default: ModelTier) -> ModelTier:
@@ -255,6 +277,7 @@ __all__ = [
     "MethodGraphDraft",
     "cleanup_paper_extraction",
     "compress_paper_extraction",
+    "extract_big_model_draft",
     "extract_claims_and_outcomes",
     "extract_frontmatter_sketch",
     "extract_method_graph",

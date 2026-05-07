@@ -22,26 +22,37 @@ models:
     max_tokens: 8192
     notes: "Explicit cheap tier. Not the default extraction tier because very small models can return empty structured content on long papers."
 
-  medium:
-    model: "openai/gpt-oss-120b"
-    context_length: 128000
-    supports_structured_output: true
-    input_cost_per_m: 0.15
-    output_cost_per_m: 0.60
-    temperature: 1.0
-    top_p: 1.0
-    reasoning_effort: low
-    max_tokens: 16384
-    notes: "Default extraction tier. Fast structured-output tier; deterministic sanitization demotes invalid repaired nodes."
+  # medium:
+  #   model: "openai/gpt-oss-120b"
+  #   context_length: 128000
+  #   supports_structured_output: true
+  #   input_cost_per_m: 0.15
+  #   output_cost_per_m: 0.60
+  #   temperature: 1.0
+  #   top_p: 1.0
+  #   reasoning_effort: low
+  #   max_tokens: 16384
+  #   notes: "Default extraction tier. Fast structured-output tier; deterministic sanitization demotes invalid repaired nodes."
 
-  heavy:
+  medium:
     model: "MiniMaxAI/MiniMax-M2.7"
-    context_length: 262144
+    context_length: 228700
     supports_structured_output: true
     input_cost_per_m: 0.30
     output_cost_per_m: 1.20
     temperature: 0.3
     max_tokens: 16384
+
+  heavy:
+    model: "deepseek-ai/DeepSeek-V4-Pro"
+    context_length: 524288
+    supports_structured_output: true
+    input_cost_per_m: 2.10
+    output_cost_per_m: 4.40
+    temperature: 1.0
+    top_p: 1.0
+    reasoning_effort: high
+    max_tokens: 24576
 
 pipeline:
   pdf:
@@ -53,23 +64,29 @@ pipeline:
 
   extraction:
     enabled: true
-    max_model_calls_per_paper: 6
+    strategy: big_model_draft
+    max_model_calls_per_paper: 2
     max_input_chars_per_stage: 50000
+    max_input_chars_per_big_model: 120000
     default_model_tier: medium
     repair_model_tier: medium
     adjudication_model_tier: heavy
-    enable_large_model_adjudication: true
-    large_model_only_for:
-      - final_cleanup
+    big_model_draft_tier: medium
+    big_model_repair_tier: medium
+    comparison_model_tiers:
+      - medium
+      - heavy
+    targeted_repair_max_chars: 16000
+    enable_large_model_adjudication: false
     enable_visual_figure_extraction: false
     include_captions: true
     include_table_text: true
     require_numeric_grounding: false
     caps:
-      max_system_nodes: 2
-      max_method_nodes: 12
-      max_setting_nodes: 30
-      max_claims: 25
+      max_system_nodes: 1
+      max_method_nodes: 10
+      max_setting_nodes: 10
+      max_claims: 8
       max_outcomes: 40
       max_demoted_items: 40
 
