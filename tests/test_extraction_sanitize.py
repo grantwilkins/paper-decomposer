@@ -13,6 +13,7 @@ Plausible wrong implementations:
 from __future__ import annotations
 
 from paper_decomposer.extraction.contracts import (
+    CandidateNode,
     EvidenceSpan,
     ExtractedClaim,
     ExtractedEdge,
@@ -39,6 +40,20 @@ def test_invalid_method_nodes_are_demoted_and_references_are_pruned() -> None:
                 section_kind="method",
                 text="TinyAttention maps logical cache blocks to physical cache blocks on demand.",
             )
+        ],
+        candidates=[
+            CandidateNode(
+                name="Method",
+                candidate_kind="method",
+                rationale="Rejected section-shaped method candidate.",
+                evidence_span_ids=["s1"],
+            ),
+            CandidateNode(
+                name="Cache handling",
+                candidate_kind="method",
+                rationale="Rejected underspecified cache candidate.",
+                evidence_span_ids=["s1"],
+            ),
         ],
         nodes=[
             ExtractedNode(

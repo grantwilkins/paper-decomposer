@@ -7,6 +7,7 @@ Plausible wrong implementations:
 - Omit the system-to-primitive graph shape, encouraging flat node bags.
 - Promote decoding scenarios such as beam search as methods in vLLM-like papers.
 - Promote implementation support such as fused kernels or APIs as first-class methods.
+- Demote concrete KV-cache mechanisms when only the mechanism sentence is missing.
 - Attach system-level throughput claims to the wrong supporting mechanism.
 """
 
@@ -34,6 +35,8 @@ def test_method_graph_prompt_calibrates_vllm_mechanism_granularity() -> None:
     assert "block-wise KV cache address translation" in content
     assert "on-demand KV block allocation" in content
     assert "KV block copy-on-write" in content
+    assert "KV-cache recomputation" in content
+    assert "Do not demote those concrete mechanisms" in content
 
 
 def test_prompts_demote_applications_and_implementation_support() -> None:
@@ -44,3 +47,4 @@ def test_prompts_demote_applications_and_implementation_support() -> None:
     assert "fused kernels" in system_content
     assert "fork/append/free APIs" in system_content
     assert "Attach composed throughput claims to the system" in system_content
+    assert "fill metric, delta/value, baseline, and comparator" in system_content

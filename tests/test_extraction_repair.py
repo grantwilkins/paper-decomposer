@@ -19,6 +19,8 @@ import pytest
 
 from paper_decomposer.extraction.contracts import (
     EvidenceSpan,
+    ExtractedClaim,
+    ExtractedEdge,
     ExtractedNode,
     ExtractionCaps,
     PaperExtraction,
@@ -65,12 +67,20 @@ def test_extract_document_repairs_invalid_method_graph(monkeypatch: pytest.Monke
         )
 
     async def fake_repair(extraction: PaperExtraction, validation_errors, *, config):
-        assert {error.code for error in validation_errors} == {
+        assert {error.code for error in validation_errors} >= {
             "method_missing_mechanism_sentence",
             "section_heading_promoted",
         }
         return ExtractionDraft(
             nodes=[
+                ExtractedNode(
+                    local_node_id="system",
+                    kind="system",
+                    canonical_name="Tiny System",
+                    description="Tiny serving system.",
+                    granularity_rationale="The paper presents Tiny System as the composed serving system.",
+                    evidence_span_ids=[extraction.evidence_spans[0].span_id],
+                ),
                 ExtractedNode(
                     local_node_id="m1",
                     kind="method",
@@ -83,7 +93,26 @@ def test_extract_document_repairs_invalid_method_graph(monkeypatch: pytest.Monke
                     ),
                     evidence_span_ids=[extraction.evidence_spans[0].span_id],
                 )
-            ]
+            ],
+            edges=[
+                ExtractedEdge(
+                    parent_id="system",
+                    child_id="m1",
+                    relation_kind="uses",
+                    evidence_span_ids=[extraction.evidence_spans[0].span_id],
+                )
+            ],
+            claims=[
+                ExtractedClaim(
+                    claim_id="c1",
+                    paper_id=extraction.paper_id,
+                    claim_type="capability",
+                    raw_text="TinyAttention maps logical cache blocks to physical cache blocks on demand.",
+                    finding="TinyAttention maps logical cache blocks to physical cache blocks on demand.",
+                    method_ids=["m1"],
+                    evidence_span_ids=[extraction.evidence_spans[0].span_id],
+                )
+            ],
         )
 
     monkeypatch.setattr("paper_decomposer.pipeline.uuid5", lambda namespace, name: "paper-id")
@@ -105,8 +134,8 @@ def test_extract_document_repairs_invalid_method_graph(monkeypatch: pytest.Monke
 
     extraction = asyncio.run(extract_document(document, config=config))
 
-    assert [node.canonical_name for node in extraction.nodes] == ["TinyAttention"]
-    assert extraction.nodes[0].mechanism_sentence is not None
+    assert [node.canonical_name for node in extraction.nodes] == ["Tiny System", "TinyAttention"]
+    assert extraction.nodes[1].mechanism_sentence is not None
 
 
 def test_extract_document_respects_repair_call_budget(monkeypatch: pytest.MonkeyPatch) -> None:

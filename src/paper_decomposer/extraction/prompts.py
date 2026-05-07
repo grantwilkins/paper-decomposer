@@ -16,7 +16,12 @@ Graph calibration:
 - Prefer a system -> central primitive -> reusable mechanisms shape.
 - For vLLM-like papers, vLLM is the system, PagedAttention is the central primitive, and reusable
   mechanisms include block-wise KV cache address translation, on-demand KV block allocation,
-  block-level KV cache sharing, KV block copy-on-write, and sequence-group preemption.
+  block-level KV cache sharing, KV block copy-on-write, sequence-group preemption,
+  KV-cache swapping, and KV-cache recomputation.
+- Do not demote those concrete mechanisms merely because a mechanism_sentence is missing. Synthesize
+  a grounded mechanism_sentence from supplied evidence, citing the spans that describe logical and
+  physical KV blocks, block tables, on-demand allocation, reference counts, copy-on-write, all-or-none
+  eviction, swapping, or recomputation.
 - Treat decoding scenarios such as single-sequence generation, parallel sampling, beam search,
   shared-prefix prompting, and chatbot serving as applications/settings or claim contexts, not
   first-class method nodes unless the paper introduces a new reusable mechanism for that scenario.
@@ -24,6 +29,9 @@ Graph calibration:
   scheduler message plumbing, code size, and implementation language.
 - Attach composed throughput claims to the system. Attach memory-layout and kernel-overhead claims
   to PagedAttention or its most specific supporting mechanism.
+- For comparison claims, fill metric, delta/value, baseline, and comparator when present in raw text.
+- Use meaningful confidence for evidence-copied claims and cited edges; do not emit 0.0 for clearly
+  grounded objects.
 """.strip()
 
 
@@ -90,8 +98,10 @@ def repair_prompt(
             "content": "Repair this extraction JSON so deterministic validation passes. "
             "If extraction_graph_missing, system_node_missing, method_edges_missing, or claims_missing appears, "
             "produce a sparse paper-local method DAG with a system root, method edges, and grounded claims. "
-            "For method_missing_mechanism_sentence, either add a grounded mechanism_sentence with inputs, outputs, "
-            "and operative move, or demote/remove the invalid method. For section_heading_promoted, demote/remove "
+            "For method_missing_mechanism_sentence, add a grounded mechanism_sentence with inputs, outputs, "
+            "and operative move when the node names a concrete reusable mechanism. Only demote vague section-shaped "
+            "or implementation-detail methods. For concrete_method_demoted_for_missing_mechanism, promote the item "
+            "back to a method node and synthesize the mechanism_sentence from evidence. For section_heading_promoted, demote/remove "
             "the section-heading node and repair affected edges/links/claims. Keep only supplied evidence IDs.\n\n"
             f"Validation errors:\n{errors}\n\nExtraction JSON:\n{extraction_json}\n\nEvidence:\n{_format_spans(evidence_spans, max_span_chars=1000)}",
         },

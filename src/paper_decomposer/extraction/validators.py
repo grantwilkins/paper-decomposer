@@ -40,6 +40,16 @@ _GENERIC_SECTION_HEADINGS = _GENERIC_METHOD_NAMES | {
     "appendix",
 }
 
+_CONCRETE_REUSABLE_METHOD_NAMES = {
+    "block wise kv cache address translation",
+    "on demand kv block allocation",
+    "block level kv cache sharing",
+    "kv block copy on write",
+    "sequence group preemption",
+    "kv cache swapping",
+    "kv cache recomputation",
+}
+
 
 def validate_extraction(
     extraction: PaperExtraction,
@@ -55,6 +65,8 @@ def validate_extraction(
     setting_by_id = {setting.local_setting_id: setting for setting in extraction.settings}
     outcome_by_id = {outcome.outcome_id: outcome for outcome in extraction.outcomes}
     section_titles = {_normalize(span.section_title) for span in extraction.evidence_spans}
+
+    errors.extend(_graph_shape_errors(extraction))
 
     for node in extraction.nodes:
         errors.extend(_missing_evidence_errors("node", node.local_node_id, node.evidence_span_ids, evidence_by_id))
@@ -104,6 +116,16 @@ def validate_extraction(
                 )
             )
         errors.extend(_missing_evidence_errors("edge", f"{edge.parent_id}->{edge.child_id}", edge.evidence_span_ids, evidence_by_id))
+        if edge.confidence <= 0 and edge.evidence_span_ids:
+            errors.append(
+                _warning(
+                    "zero_confidence_grounded_edge",
+                    "Grounded edge should use meaningful confidence or omit confidence upstream.",
+                    object_kind="edge",
+                    object_id=f"{edge.parent_id}->{edge.child_id}",
+                    evidence_span_ids=edge.evidence_span_ids,
+                )
+            )
 
     for link in extraction.method_setting_links:
         if link.method_id not in node_by_id or link.setting_id not in setting_by_id:
@@ -193,6 +215,28 @@ def validate_extraction(
                     evidence_span_ids=claim.evidence_span_ids,
                 )
             )
+        if _claim_needs_structured_fields(claim) and not any(
+            [claim.metric, claim.value, claim.delta, claim.baseline, claim.comparator]
+        ):
+            errors.append(
+                _warning(
+                    "claim_structured_fields_missing",
+                    "Comparison claim should expose metric, delta/value, baseline, or comparator fields.",
+                    object_kind="claim",
+                    object_id=claim.claim_id,
+                    evidence_span_ids=claim.evidence_span_ids,
+                )
+            )
+        if claim.confidence <= 0 and claim.evidence_span_ids and _appears_in_evidence(claim.raw_text, claim.evidence_span_ids, evidence_by_id):
+            errors.append(
+                _warning(
+                    "zero_confidence_grounded_claim",
+                    "Grounded claim should use meaningful confidence or omit confidence upstream.",
+                    object_kind="claim",
+                    object_id=claim.claim_id,
+                    evidence_span_ids=claim.evidence_span_ids,
+                )
+            )
 
     promoted_names = {_normalize(node.canonical_name) for node in extraction.nodes}
     promoted_names.update(_normalize(setting.canonical_name) for setting in extraction.settings)
@@ -208,9 +252,76 @@ def validate_extraction(
                     evidence_span_ids=item.evidence_span_ids,
                 )
             )
+        if _is_concrete_reusable_method_demoted_for_missing_mechanism(item.name, item.reason_demoted):
+            errors.append(
+                _error(
+                    "concrete_method_demoted_for_missing_mechanism",
+                    "Concrete reusable method was demoted for a missing mechanism sentence; synthesize the mechanism from evidence instead.",
+                    object_kind="demoted_item",
+                    object_id=item.name,
+                    evidence_span_ids=item.evidence_span_ids,
+                )
+            )
 
     errors.extend(_cap_warnings(extraction, caps))
     return ExtractionValidationReport(errors=errors)
+
+
+def _graph_shape_errors(extraction: PaperExtraction) -> list[ExtractionValidationError]:
+    if not extraction.evidence_spans:
+        return []
+
+    errors: list[ExtractionValidationError] = []
+    if not extraction.nodes and not extraction.edges and not extraction.claims:
+        errors.append(
+            _error(
+                "extraction_graph_missing",
+                "Extraction preserved evidence spans but produced no method-family nodes, edges, or claims.",
+            )
+        )
+        return errors
+
+    if not extraction.nodes and (extraction.edges or any(claim.method_ids for claim in extraction.claims)):
+        errors.append(
+            _error(
+                "graph_references_without_nodes",
+                "Edges or method-linked claims require declared method-family nodes.",
+            )
+        )
+
+    if extraction.demoted_items and not extraction.candidates:
+        errors.append(
+            _error(
+                "candidates_missing_for_demotions",
+                "Demoted items require candidate provenance so repair can promote or justify each candidate.",
+            )
+        )
+
+    if extraction.nodes and not any(node.kind == "system" for node in extraction.nodes):
+        errors.append(
+            _error(
+                "system_node_missing",
+                "Method graph must include the paper-local system or introduced artifact root.",
+            )
+        )
+
+    method_family_count = len(extraction.nodes)
+    if method_family_count >= 2 and not extraction.edges:
+        errors.append(
+            _error(
+                "method_edges_missing",
+                "Multiple method-family nodes require method DAG edges.",
+            )
+        )
+
+    if extraction.nodes and not extraction.claims:
+        errors.append(
+            _error(
+                "claims_missing",
+                "Method graph must attach at least one grounded claim.",
+            )
+        )
+    return errors
 
 
 def _missing_evidence_errors(
@@ -315,8 +426,28 @@ def _contains_digit(value: str) -> bool:
     return any(char.isdigit() for char in value)
 
 
+def _claim_needs_structured_fields(claim: object) -> bool:
+    text = f"{getattr(claim, 'raw_text', '')} {getattr(claim, 'finding', '')}".casefold()
+    if not _contains_digit(text):
+        return False
+    comparison_markers = ("compared", "than", "higher", "lower", "versus", " vs ", "×", "x", "%")
+    return any(marker in text for marker in comparison_markers)
+
+
+def _is_concrete_reusable_method_demoted_for_missing_mechanism(name: str, reason: str) -> bool:
+    normalized_name = _normalize_identifier(name)
+    normalized_reason = _normalize_identifier(reason)
+    if "mechanism sentence" not in normalized_reason:
+        return False
+    return any(method_name in normalized_name for method_name in _CONCRETE_REUSABLE_METHOD_NAMES)
+
+
 def _normalize(value: str) -> str:
     return " ".join(value.strip().casefold().split())
+
+
+def _normalize_identifier(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
 def _normalize_for_grounding(value: str) -> str:

@@ -4,6 +4,8 @@ Extraction validation blocks semantically unsafe graph writes while allowing
 explicitly reported warnings for suspicious but recoverable paper-local output.
 
 Plausible wrong implementations:
+- Accept evidence-only output as a completed extraction.
+- Accept a node bag without a method DAG root, edges, or claims.
 - Accept method nodes without mechanism sentences.
 - Let edges, claims, or outcomes reference nonexistent local IDs.
 - Treat demoted implementation details as first-class nodes.
@@ -16,6 +18,7 @@ from __future__ import annotations
 from pydantic import ValidationError
 
 from paper_decomposer.extraction.contracts import (
+    CandidateNode,
     DemotedItem,
     EvidenceSpan,
     ExtractedClaim,
@@ -42,7 +45,29 @@ def _valid_extraction() -> PaperExtraction:
         extraction_run_id="run-1",
         title="vLLM",
         evidence_spans=[span],
+        candidates=[
+            CandidateNode(
+                name="vLLM",
+                candidate_kind="system",
+                rationale="Top-level introduced serving system.",
+                evidence_span_ids=["s1"],
+            ),
+            CandidateNode(
+                name="PagedAttention",
+                candidate_kind="method",
+                rationale="Reusable KV cache block mapping mechanism.",
+                evidence_span_ids=["s1"],
+            ),
+        ],
         nodes=[
+            ExtractedNode(
+                local_node_id="system",
+                kind="system",
+                canonical_name="vLLM",
+                description="LLM serving system.",
+                granularity_rationale="The paper presents vLLM as the composed serving system.",
+                evidence_span_ids=["s1"],
+            ),
             ExtractedNode(
                 local_node_id="m1",
                 kind="method",
@@ -50,6 +75,18 @@ def _valid_extraction() -> PaperExtraction:
                 description="KV cache management mechanism.",
                 granularity_rationale="It defines a reusable KV block mapping mechanism.",
                 mechanism_sentence="Given logical KV blocks, PagedAttention outputs physical block addresses by mapping blocks on demand.",
+                evidence_span_ids=["s1"],
+            )
+        ],
+        edges=[ExtractedEdge(parent_id="system", child_id="m1", relation_kind="uses", evidence_span_ids=["s1"])],
+        claims=[
+            ExtractedClaim(
+                claim_id="c0",
+                paper_id="paper-1",
+                claim_type="capability",
+                raw_text="PagedAttention maps logical KV cache blocks to physical blocks on demand.",
+                finding="PagedAttention maps logical KV cache blocks to physical blocks on demand.",
+                method_ids=["m1"],
                 evidence_span_ids=["s1"],
             )
         ],
@@ -67,7 +104,7 @@ def test_method_edges_cannot_use_cross_family_applicability_relation() -> None:
 
 def test_validator_blocks_missing_mechanism_and_missing_edge_endpoint() -> None:
     extraction = _valid_extraction()
-    extraction.nodes[0].mechanism_sentence = None
+    extraction.nodes[1].mechanism_sentence = None
     extraction.edges.append(ExtractedEdge(parent_id="m1", child_id="missing", relation_kind="uses", evidence_span_ids=["s1"]))
 
     report = validate_extraction(extraction)
@@ -76,6 +113,91 @@ def test_validator_blocks_missing_mechanism_and_missing_edge_endpoint() -> None:
     assert "method_missing_mechanism_sentence" in codes
     assert "edge_endpoint_missing" in codes
     assert not report.ok
+
+
+def test_validator_blocks_evidence_only_output() -> None:
+    extraction = PaperExtraction(
+        paper_id="paper-1",
+        extraction_run_id="run-1",
+        title="vLLM",
+        evidence_spans=[
+            EvidenceSpan(
+                span_id="s1",
+                paper_id="paper-1",
+                section_title="Abstract",
+                section_kind="abstract",
+                text="vLLM improves throughput with PagedAttention.",
+            )
+        ],
+    )
+
+    report = validate_extraction(extraction)
+
+    assert "extraction_graph_missing" in {error.code for error in report.blocking_errors}
+
+
+def test_validator_blocks_graph_references_without_declared_nodes() -> None:
+    extraction = PaperExtraction(
+        paper_id="paper-1",
+        extraction_run_id="run-1",
+        title="vLLM",
+        evidence_spans=[
+            EvidenceSpan(
+                span_id="s1",
+                paper_id="paper-1",
+                section_title="Abstract",
+                section_kind="abstract",
+                text="vLLM uses PagedAttention.",
+            )
+        ],
+        edges=[ExtractedEdge(parent_id="system_vLLM", child_id="central_PagedAttention", relation_kind="uses", evidence_span_ids=["s1"])],
+        claims=[
+            ExtractedClaim(
+                claim_id="c1",
+                paper_id="paper-1",
+                claim_type="performance",
+                raw_text="vLLM uses PagedAttention.",
+                finding="vLLM uses PagedAttention.",
+                method_ids=["system_vLLM"],
+                evidence_span_ids=["s1"],
+            )
+        ],
+    )
+
+    report = validate_extraction(extraction)
+
+    codes = {error.code for error in report.blocking_errors}
+    assert "graph_references_without_nodes" in codes
+    assert "edge_endpoint_missing" in codes
+    assert "claim_method_missing" in codes
+
+
+def test_validator_blocks_node_bag_without_edges_or_claims() -> None:
+    extraction = _valid_extraction()
+    extraction.nodes = [
+        node.model_copy(update={"local_node_id": "m2", "canonical_name": "KV Cache Manager"})
+        if node.local_node_id == "m1"
+        else node
+        for node in extraction.nodes
+    ]
+    extraction.edges = []
+    extraction.claims = []
+
+    report = validate_extraction(extraction)
+
+    codes = {error.code for error in report.blocking_errors}
+    assert "method_edges_missing" in codes
+    assert "claims_missing" in codes
+
+
+def test_validator_blocks_method_graph_without_system_root() -> None:
+    extraction = _valid_extraction()
+    extraction.nodes = [node for node in extraction.nodes if node.kind != "system"]
+    extraction.edges = []
+
+    report = validate_extraction(extraction)
+
+    assert "system_node_missing" in {error.code for error in report.blocking_errors}
 
 
 def test_validator_allows_named_method_that_matches_section_title() -> None:
@@ -112,6 +234,52 @@ def test_validator_blocks_demoted_item_promoted_as_node() -> None:
     report = validate_extraction(extraction)
 
     assert "demoted_item_promoted" in {error.code for error in report.blocking_errors}
+
+
+def test_validator_blocks_concrete_reusable_mechanism_demoted_for_missing_sentence() -> None:
+    extraction = _valid_extraction()
+    extraction.demoted_items.append(
+        DemotedItem(
+            name="KV block copy-on-write",
+            reason_demoted="Method node lacks a grounded mechanism sentence with inputs, outputs, and operative move.",
+            stored_under="m1",
+            evidence_span_ids=["s1"],
+        )
+    )
+
+    report = validate_extraction(extraction)
+
+    assert "concrete_method_demoted_for_missing_mechanism" in {error.code for error in report.blocking_errors}
+
+
+def test_validator_blocks_demotions_without_candidate_provenance() -> None:
+    extraction = _valid_extraction()
+    extraction.candidates = []
+    extraction.demoted_items.append(
+        DemotedItem(
+            name="fused block copy",
+            reason_demoted="Implementation detail.",
+            stored_under="m1",
+            evidence_span_ids=["s1"],
+        )
+    )
+
+    report = validate_extraction(extraction)
+
+    assert "candidates_missing_for_demotions" in {error.code for error in report.blocking_errors}
+
+
+def test_validator_warns_for_understructured_comparison_claim_and_zero_confidence() -> None:
+    extraction = _valid_extraction()
+    extraction.evidence_spans[0].text = "vLLM can sustain 2x higher request rates than Orca."
+    extraction.claims[0].raw_text = "vLLM can sustain 2x higher request rates than Orca."
+    extraction.claims[0].finding = "vLLM can sustain 2x higher request rates than Orca."
+
+    report = validate_extraction(extraction)
+
+    warning_codes = {warning.code for warning in report.warnings}
+    assert "claim_structured_fields_missing" in warning_codes
+    assert "zero_confidence_grounded_claim" in warning_codes
 
 
 def test_validator_warns_when_numeric_value_is_not_in_cited_evidence() -> None:
