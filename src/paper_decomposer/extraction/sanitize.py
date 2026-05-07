@@ -56,19 +56,30 @@ def demote_invalid_method_nodes(extraction: PaperExtraction) -> PaperExtraction:
     kept_node_ids = {node.local_node_id for node in kept_nodes}
     setting_ids = {setting.local_setting_id for setting in extraction.settings}
     outcome_ids = {outcome.outcome_id for outcome in extraction.outcomes}
-    return extraction.model_copy(
+    graph = extraction.graph.model_copy(
         update={
-            "nodes": kept_nodes,
-            "edges": [
+            "systems": [node for node in kept_nodes if node.kind == "system"],
+            "methods": [node for node in kept_nodes if node.kind != "system"],
+            "method_edges": [
                 edge
                 for edge in extraction.edges
                 if edge.parent_id in kept_node_ids and edge.child_id in kept_node_ids
+            ],
+            "setting_edges": [
+                edge
+                for edge in extraction.setting_edges
+                if edge.parent_id in setting_ids and edge.child_id in setting_ids
             ],
             "method_setting_links": [
                 link
                 for link in extraction.method_setting_links
                 if link.method_id in kept_node_ids and link.setting_id in setting_ids
             ],
+        }
+    )
+    return extraction.model_copy(
+        update={
+            "graph": graph,
             "outcomes": [
                 outcome.model_copy(
                     update={

@@ -9,6 +9,7 @@ _METHOD_EDGE_RELATION = {
     "uses": "composes",
     "is_a": "is_a",
     "refines": "refines",
+    "composes": "composes",
 }
 
 
@@ -21,6 +22,7 @@ class DBWritePlan(BaseModel):
     methods: list[dict[str, object]] = Field(default_factory=list)
     method_edges: list[dict[str, object]] = Field(default_factory=list)
     settings: list[dict[str, object]] = Field(default_factory=list)
+    setting_edges: list[dict[str, object]] = Field(default_factory=list)
     method_setting_links: list[dict[str, object]] = Field(default_factory=list)
     outcomes: list[dict[str, object]] = Field(default_factory=list)
     claims: list[dict[str, object]] = Field(default_factory=list)
@@ -100,6 +102,20 @@ def build_db_write_plan(extraction: PaperExtraction) -> DBWritePlan:
             }
         )
         plan.local_evidence_links.extend(_evidence_links(setting.evidence_span_ids, "setting", setting.local_setting_id))
+
+    for edge in extraction.setting_edges:
+        local_edge_id = f"{edge.parent_id}->{edge.child_id}:{edge.relation_kind}"
+        plan.setting_edges.append(
+            {
+                "local_edge_id": local_edge_id,
+                "parent_local_setting_id": edge.parent_id,
+                "child_local_setting_id": edge.child_id,
+                "relation": edge.relation_kind,
+                "confidence": edge.confidence,
+                "metadata": {"evidence_span_ids": edge.evidence_span_ids},
+            }
+        )
+        plan.local_evidence_links.extend(_evidence_links(edge.evidence_span_ids, "setting_edge", local_edge_id))
 
     for link in extraction.method_setting_links:
         local_link_id = f"{link.method_id}->{link.setting_id}:{link.relation_kind}"

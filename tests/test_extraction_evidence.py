@@ -9,6 +9,7 @@ Plausible wrong implementations:
 - Fabricate page ranges for section text even though Section has no page fields.
 - Drop parser-provided artifact page numbers and artifact IDs.
 - Produce unstable span IDs across repeated runs on the same document.
+- Send isolated plot labels and tick values as ordinary prose spans.
 """
 
 from __future__ import annotations
@@ -86,3 +87,32 @@ def test_table_captions_obey_table_text_policy() -> None:
 
     assert any(span.artifact_id == "tbl-1" for span in with_tables)
     assert all(span.artifact_id != "tbl-1" for span in without_tables)
+
+
+def test_isolated_visual_fragments_are_filtered_but_captions_remain() -> None:
+    document = PaperDocument(
+        metadata=PaperMetadata(title="vLLM"),
+        sections=[
+            Section(
+                title="Introduction",
+                role=RhetoricalRole.introduction,
+                body_text=(
+                    "vLLM proposes PagedAttention for high-throughput LLM serving.\n\n"
+                    "Memory usage (GB)\n\n"
+                    "1.2k\n\n"
+                    "Batch size (# requests)\n\n"
+                    "Figure 1. vLLM reduces KV cache waste in serving workloads."
+                ),
+                char_count=154,
+            )
+        ],
+    )
+
+    spans = select_evidence_spans(document, paper_id="paper-1")
+    texts = {span.text for span in spans}
+
+    assert "vLLM proposes PagedAttention for high-throughput LLM serving." in texts
+    assert "Figure 1. vLLM reduces KV cache waste in serving workloads." in texts
+    assert "Memory usage (GB)" not in texts
+    assert "1.2k" not in texts
+    assert "Batch size (# requests)" not in texts

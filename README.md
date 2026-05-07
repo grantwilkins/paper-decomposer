@@ -2,7 +2,9 @@
 
 A pipeline that ingests ML / systems research papers (PDFs) into a Postgres-backed **methods / settings / outcomes / claims DAG**, designed to scale to hundreds of thousands of papers across the field.
 
-This repository is in the middle of a reset. PDF parsing, the LLM client, runtime configuration, staged paper-local extraction, deterministic validation, CLI extraction dry runs, and local-ID DB write planning are in place. The remaining DB work is the transaction layer that resolves local IDs to database UUIDs and persists validated extraction output through [src/paper_decomposer/db/schema.sql](src/paper_decomposer/db/schema.sql).
+This repository is in the middle of a reset. PDF parsing, the LLM client, runtime configuration, staged graph-first paper-local extraction, deterministic validation, CLI extraction dry runs, and local-ID DB write planning are in place. The remaining DB work is the transaction layer that resolves local IDs to database UUIDs and persists validated extraction output through [src/paper_decomposer/db/schema.sql](src/paper_decomposer/db/schema.sql).
+
+A valid extraction is a paper-local method/settings graph with source-grounded claims and outcomes attached to that graph. Claims-only output is treated as a draft and fails validation.
 
 ---
 
@@ -77,6 +79,8 @@ The DAG schema lives in [src/paper_decomposer/db/schema.sql](src/paper_decompose
 - **`outcomes`** — `(paper, method, setting, metric, value, delta, baseline_method)` rows.
 - **`claims`** — typed, scored claims with optional embeddings, linked to one or more methods/settings/outcomes via `claim_links`.
 - **`evidence_spans` / `evidence_links`** — text-grounded provenance for paper-local nodes, edges, settings, outcomes, and claims.
+
+Extraction dry-run JSON emits promoted graph objects under `graph.systems`, `graph.methods`, `graph.method_edges`, `graph.settings`, `graph.setting_edges`, and `graph.method_setting_links`; final `candidates` are intentionally not part of the completed artifact.
 
 Indexing: B-tree for canonical lookups, `pg_trgm` GIN for fuzzy-name lookups across aliases, HNSW (pgvector) for semantic dedup. DAG traversal uses recursive CTEs over the `*_edges` tables.
 

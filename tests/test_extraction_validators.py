@@ -5,6 +5,7 @@ explicitly reported warnings for suspicious but recoverable paper-local output.
 
 Plausible wrong implementations:
 - Accept evidence-only output as a completed extraction.
+- Accept claims-only output as a completed extraction.
 - Accept a node bag without a method DAG root, edges, or claims.
 - Accept method nodes without mechanism sentences.
 - Let edges, claims, or outcomes reference nonexistent local IDs.
@@ -27,6 +28,7 @@ from paper_decomposer.extraction.contracts import (
     ExtractedNode,
     ExtractedOutcome,
     ExtractedSetting,
+    ExtractedSettingEdge,
     PaperExtraction,
 )
 from paper_decomposer.extraction.validators import validate_extraction
@@ -172,15 +174,57 @@ def test_validator_blocks_graph_references_without_declared_nodes() -> None:
     assert "claim_method_missing" in codes
 
 
+def test_validator_blocks_claim_draft_without_graph_or_attachments() -> None:
+    extraction = PaperExtraction(
+        paper_id="paper-1",
+        extraction_run_id="run-1",
+        title="vLLM",
+        evidence_spans=[
+            EvidenceSpan(
+                span_id="s1",
+                paper_id="paper-1",
+                section_title="Abstract",
+                section_kind="abstract",
+                text="vLLM improves throughput by 2-4x with the same level of latency.",
+            )
+        ],
+        claims=[
+            ExtractedClaim(
+                claim_id="c1",
+                paper_id="paper-1",
+                claim_type="performance",
+                raw_text="vLLM improves throughput by 2-4x with the same level of latency.",
+                finding="vLLM improves throughput by 2-4x.",
+                evidence_span_ids=["s1"],
+                confidence=0.0,
+            )
+        ],
+    )
+
+    report = validate_extraction(extraction)
+
+    blocking_codes = {error.code for error in report.blocking_errors}
+    warning_codes = {warning.code for warning in report.warnings}
+    assert "no_graph_nodes" in blocking_codes
+    assert "claims_unattached" in blocking_codes
+    assert "zero_confidence_default" in warning_codes
+
+
 def test_validator_blocks_node_bag_without_edges_or_claims() -> None:
     extraction = _valid_extraction()
-    extraction.nodes = [
+    nodes = [
         node.model_copy(update={"local_node_id": "m2", "canonical_name": "KV Cache Manager"})
         if node.local_node_id == "m1"
         else node
         for node in extraction.nodes
     ]
-    extraction.edges = []
+    extraction.graph = extraction.graph.model_copy(
+        update={
+            "systems": [node for node in nodes if node.kind == "system"],
+            "methods": [node for node in nodes if node.kind != "system"],
+            "method_edges": [],
+        }
+    )
     extraction.claims = []
 
     report = validate_extraction(extraction)
@@ -192,8 +236,14 @@ def test_validator_blocks_node_bag_without_edges_or_claims() -> None:
 
 def test_validator_blocks_method_graph_without_system_root() -> None:
     extraction = _valid_extraction()
-    extraction.nodes = [node for node in extraction.nodes if node.kind != "system"]
-    extraction.edges = []
+    nodes = [node for node in extraction.nodes if node.kind != "system"]
+    extraction.graph = extraction.graph.model_copy(
+        update={
+            "systems": [],
+            "methods": nodes,
+            "method_edges": [],
+        }
+    )
 
     report = validate_extraction(extraction)
 
@@ -252,21 +302,14 @@ def test_validator_blocks_concrete_reusable_mechanism_demoted_for_missing_senten
     assert "concrete_method_demoted_for_missing_mechanism" in {error.code for error in report.blocking_errors}
 
 
-def test_validator_blocks_demotions_without_candidate_provenance() -> None:
+def test_final_extraction_serializes_graph_without_candidates() -> None:
     extraction = _valid_extraction()
-    extraction.candidates = []
-    extraction.demoted_items.append(
-        DemotedItem(
-            name="fused block copy",
-            reason_demoted="Implementation detail.",
-            stored_under="m1",
-            evidence_span_ids=["s1"],
-        )
-    )
 
-    report = validate_extraction(extraction)
+    payload = extraction.model_dump(mode="json")
 
-    assert "candidates_missing_for_demotions" in {error.code for error in report.blocking_errors}
+    assert "candidates" not in payload
+    assert [node["canonical_name"] for node in payload["graph"]["systems"]] == ["vLLM"]
+    assert [node["canonical_name"] for node in payload["graph"]["methods"]] == ["PagedAttention"]
 
 
 def test_validator_warns_for_understructured_comparison_claim_and_zero_confidence() -> None:
@@ -274,12 +317,13 @@ def test_validator_warns_for_understructured_comparison_claim_and_zero_confidenc
     extraction.evidence_spans[0].text = "vLLM can sustain 2x higher request rates than Orca."
     extraction.claims[0].raw_text = "vLLM can sustain 2x higher request rates than Orca."
     extraction.claims[0].finding = "vLLM can sustain 2x higher request rates than Orca."
+    extraction.claims[0].confidence = 0.0
 
     report = validate_extraction(extraction)
 
     warning_codes = {warning.code for warning in report.warnings}
     assert "claim_structured_fields_missing" in warning_codes
-    assert "zero_confidence_grounded_claim" in warning_codes
+    assert "zero_confidence_default" in warning_codes
 
 
 def test_validator_warns_when_numeric_value_is_not_in_cited_evidence() -> None:
@@ -303,7 +347,7 @@ def test_validator_warns_when_numeric_value_is_not_in_cited_evidence() -> None:
     assert "numeric_grounding_unverified" in {warning.code for warning in report.warnings}
 
 
-def test_validator_blocks_nonexistent_claim_outcome_and_method_setting_targets() -> None:
+def test_validator_blocks_nonexistent_claim_outcome_setting_edge_and_method_setting_targets() -> None:
     extraction = _valid_extraction()
     extraction.settings.append(
         ExtractedSetting(
@@ -319,6 +363,14 @@ def test_validator_blocks_nonexistent_claim_outcome_and_method_setting_targets()
             method_id="m1",
             setting_id="missing",
             relation_kind="applies_to",
+            evidence_span_ids=["s1"],
+        )
+    )
+    extraction.graph.setting_edges.append(
+        ExtractedSettingEdge(
+            parent_id="set1",
+            child_id="missing",
+            relation_kind="specializes",
             evidence_span_ids=["s1"],
         )
     )
@@ -347,6 +399,7 @@ def test_validator_blocks_nonexistent_claim_outcome_and_method_setting_targets()
 
     codes = {error.code for error in report.blocking_errors}
     assert "method_setting_endpoint_missing" in codes
+    assert "setting_edge_endpoint_missing" in codes
     assert "outcome_method_missing" in codes
     assert "claim_outcome_missing" in codes
 

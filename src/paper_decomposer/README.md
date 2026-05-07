@@ -1,6 +1,6 @@
 # paper_decomposer (package)
 
-The implementation of the paper-decomposer pipeline. PDF in -> parsed `PaperDocument` -> validated paper-local extraction JSON, with the storage schema ready for DB persistence.
+The implementation of the paper-decomposer pipeline. PDF in -> parsed `PaperDocument` -> graph-first validated paper-local extraction JSON, with the storage schema ready for DB persistence.
 
 ## Module map
 
@@ -29,11 +29,11 @@ The implementation of the paper-decomposer pipeline. PDF in -> parsed `PaperDocu
   v select_evidence_spans
  EvidenceSpan[]
   |
-  v staged extraction + validation
- PaperExtraction(methods, settings, outcomes, claims)
+  v staged graph-first extraction + validation
+ PaperExtraction(graph.systems, graph.methods, graph.settings, outcomes, claims)
 ```
 
-The live DB transaction layer is still separate. The current extraction code produces validated JSON and a schema-aware write plan that preserves paper-local IDs and evidence.
+The live DB transaction layer is still separate. The current extraction code produces validated JSON and a schema-aware write plan that preserves paper-local IDs and evidence. Claims-only output is a draft and fails validation until graph nodes and attachments exist.
 
 ## Cost tracking
 

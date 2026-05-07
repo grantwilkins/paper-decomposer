@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS method_setting_links (
     paper_id    uuid NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
     method_id   uuid NOT NULL REFERENCES methods(id) ON DELETE CASCADE,
     setting_id  uuid NOT NULL REFERENCES settings(id) ON DELETE CASCADE,
-    relation    text NOT NULL CHECK (relation IN ('applies_to','evaluated_on')),
+    relation    text NOT NULL CHECK (relation IN ('applies_to','evaluated_on','uses_artifact')),
     confidence  double precision NOT NULL DEFAULT 1.0,
     metadata    jsonb NOT NULL DEFAULT '{}'::jsonb,
     UNIQUE (paper_id, method_id, setting_id, relation)

@@ -1,6 +1,16 @@
 # Goal
 
-Finish the path from validated paper-local extraction JSON to durable Postgres records while keeping extraction cheap, text-grounded, and paper-local until global canonicalization exists.
+Implement and persist a graph-first extraction stage.
+
+A valid extraction is not a list of claims about a paper. A valid extraction is a paper-local method/settings graph with source-grounded claims and outcomes attached to the most specific graph nodes.
+
+The first milestone is to make papers like vLLM and ORCA produce their central graph spine from abstract + introduction + method overview text:
+
+- vLLM -> uses PagedAttention
+- ORCA -> uses iteration-level scheduling
+- ORCA -> uses selective batching
+
+Claims may be extracted only after graph nodes exist. If claims exist but no graph nodes or attachments exist, validation must fail.
 
 ## Current State
 
@@ -8,9 +18,11 @@ Finish the path from validated paper-local extraction JSON to durable Postgres r
 - Evidence span selection is implemented.
 - Staged extraction contracts, prompts, and model calls are implemented.
 - Deterministic extraction validation is implemented.
+- Final `PaperExtraction` emits promoted graph fields under `graph`, not final `candidates`.
+- Claims-only extractions fail validation with graph and attachment errors.
 - CLI extraction dry run is implemented with `--extract --output-json`.
 - A local-ID DB write plan is implemented.
-- The schema has extraction runs, evidence spans, evidence links, method-setting links, model artifacts, and metrics.
+- The schema has extraction runs, evidence spans, evidence links, setting edges, method-setting links, model artifacts, and metrics.
 
 ## Remaining Persistence Work
 
@@ -21,7 +33,7 @@ Finish the path from validated paper-local extraction JSON to durable Postgres r
 - Persist method aliases from node metadata into `method_aliases`.
 - Persist method edges after translating `uses` to `composes`.
 - Persist settings, including `model_artifact` and `metric`.
-- Add a setting-edge contract and writer path if setting hierarchy is needed in this cut.
+- Persist setting edges.
 - Persist method-setting applicability through `method_setting_links`.
 - Persist outcomes from multi-method and multi-setting extraction output.
 - Decide whether outcomes expand to one row per method-setting pair or whether the schema should support multi-target outcome links.

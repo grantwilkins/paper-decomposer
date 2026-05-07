@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from paper_decomposer.models import call_model
 from paper_decomposer.schema import ModelTier
@@ -18,6 +18,7 @@ from .contracts import (
     ExtractedOutcome,
     ExtractedSetting,
     ExtractionValidationError,
+    PaperGraph,
     PaperExtraction,
 )
 from .prompts import (
@@ -29,25 +30,53 @@ from .prompts import (
 )
 
 
-class FrontmatterSketch(BaseModel):
+class GraphSketch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     paper_metadata: dict[str, Any] = Field(default_factory=dict)
     central_problem_candidates: list[str] = Field(default_factory=list)
     contribution_span_ids: list[str] = Field(default_factory=list)
     candidates: list[CandidateNode] = Field(default_factory=list)
+    graph: PaperGraph = Field(default_factory=PaperGraph)
     central_primitive_guess: str | None = None
+    demoted_items: list[DemotedItem] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_graph_fields(cls, data: object) -> object:
+        return _lift_graph_payload(data)
+
+    @property
+    def nodes(self) -> list[ExtractedNode]:
+        return self.graph.nodes
+
+    @property
+    def edges(self) -> list[ExtractedEdge]:
+        return self.graph.method_edges
+
+
+FrontmatterSketch = GraphSketch
 
 
 class MethodGraphDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidates: list[CandidateNode] = Field(default_factory=list)
-    nodes: list[ExtractedNode] = Field(default_factory=list)
-    edges: list[ExtractedEdge] = Field(default_factory=list)
-    settings: list[ExtractedSetting] = Field(default_factory=list)
-    method_setting_links: list[ExtractedMethodSettingLink] = Field(default_factory=list)
+    graph: PaperGraph = Field(default_factory=PaperGraph)
     demoted_items: list[DemotedItem] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_graph_fields(cls, data: object) -> object:
+        return _lift_graph_payload(data)
+
+    @property
+    def nodes(self) -> list[ExtractedNode]:
+        return self.graph.nodes
+
+    @property
+    def edges(self) -> list[ExtractedEdge]:
+        return self.graph.method_edges
 
 
 class ClaimsOutcomesDraft(BaseModel):
@@ -61,14 +90,18 @@ class ClaimsOutcomesDraft(BaseModel):
 class ExtractionDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    candidates: list[CandidateNode] = Field(default_factory=list)
-    nodes: list[ExtractedNode] = Field(default_factory=list)
-    edges: list[ExtractedEdge] = Field(default_factory=list)
-    settings: list[ExtractedSetting] = Field(default_factory=list)
-    method_setting_links: list[ExtractedMethodSettingLink] = Field(default_factory=list)
+    graph: PaperGraph = Field(default_factory=PaperGraph)
     outcomes: list[ExtractedOutcome] = Field(default_factory=list)
     claims: list[ExtractedClaim] = Field(default_factory=list)
     demoted_items: list[DemotedItem] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_graph_fields(cls, data: object) -> object:
+        lifted = _lift_graph_payload(data)
+        if isinstance(lifted, dict):
+            lifted.pop("candidates", None)
+        return lifted
 
 
 async def extract_frontmatter_sketch(
@@ -122,7 +155,7 @@ async def compress_paper_extraction(
     tier = _adjudication_model_tier(config)
     return await call_model(
         tier,
-        compression_prompt(graph.model_dump_json(), claims.model_dump_json()),
+        compression_prompt(graph.model_dump_json(exclude={"candidates", "demoted_items"}), claims.model_dump_json()),
         response_schema=ExtractionDraft,
         config=config,
     )
@@ -172,10 +205,31 @@ def _extraction_config(config: Any) -> dict[str, Any]:
     return {}
 
 
+def _lift_graph_payload(data: object) -> object:
+    if not isinstance(data, dict):
+        return data
+    lifted = dict(data)
+    graph = dict(lifted.get("graph") or {})
+    legacy_keys = {
+        "nodes": "nodes",
+        "edges": "edges",
+        "settings": "settings",
+        "setting_edges": "setting_edges",
+        "method_setting_links": "method_setting_links",
+    }
+    for old_key, graph_key in legacy_keys.items():
+        if old_key in lifted and graph_key not in graph:
+            graph[graph_key] = lifted.pop(old_key)
+    if graph:
+        lifted["graph"] = graph
+    return lifted
+
+
 __all__ = [
     "ClaimsOutcomesDraft",
     "ExtractionDraft",
     "FrontmatterSketch",
+    "GraphSketch",
     "MethodGraphDraft",
     "compress_paper_extraction",
     "extract_claims_and_outcomes",

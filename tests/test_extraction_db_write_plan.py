@@ -21,6 +21,7 @@ from paper_decomposer.extraction.contracts import (
     ExtractedMethodSettingLink,
     ExtractedNode,
     ExtractedSetting,
+    ExtractedSettingEdge,
     PaperExtraction,
 )
 from paper_decomposer.extraction.db_write_plan import ExtractionPersistenceError, build_db_write_plan
@@ -66,6 +67,21 @@ def _extraction() -> PaperExtraction:
                 kind="model_artifact",
                 canonical_name="LLaMA-13B",
                 description="Evaluated model artifact.",
+                evidence_span_ids=["s1"],
+            ),
+            ExtractedSetting(
+                local_setting_id="workload-1",
+                kind="workload",
+                canonical_name="ShareGPT workload",
+                description="Evaluated serving workload.",
+                evidence_span_ids=["s1"],
+            )
+        ],
+        setting_edges=[
+            ExtractedSettingEdge(
+                parent_id="workload-1",
+                child_id="model-1",
+                relation_kind="composes",
                 evidence_span_ids=["s1"],
             )
         ],
@@ -125,10 +141,12 @@ def test_write_plan_keeps_applicability_out_of_method_edges() -> None:
             "parent_local_node_id": "system",
             "child_local_node_id": "m1",
             "relation": "composes",
-            "confidence": 0.0,
+            "confidence": None,
             "metadata": {"paper_local_relation": "uses", "evidence_span_ids": ["s1"]},
         }
     ]
+    assert plan.setting_edges[0]["relation"] == "composes"
+    assert plan.setting_edges[0]["parent_local_setting_id"] == "workload-1"
     assert plan.method_setting_links[0]["relation"] == "applies_to"
 
 

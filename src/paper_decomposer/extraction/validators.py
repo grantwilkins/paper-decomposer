@@ -116,16 +116,36 @@ def validate_extraction(
                 )
             )
         errors.extend(_missing_evidence_errors("edge", f"{edge.parent_id}->{edge.child_id}", edge.evidence_span_ids, evidence_by_id))
-        if edge.confidence <= 0 and edge.evidence_span_ids:
+        if _is_explicit_zero(edge.confidence) and edge.evidence_span_ids:
             errors.append(
                 _warning(
-                    "zero_confidence_grounded_edge",
-                    "Grounded edge should use meaningful confidence or omit confidence upstream.",
+                    "zero_confidence_default",
+                    "Grounded edge has confidence=0.0; use null for unscored confidence.",
                     object_kind="edge",
                     object_id=f"{edge.parent_id}->{edge.child_id}",
                     evidence_span_ids=edge.evidence_span_ids,
                 )
             )
+
+    for edge in extraction.setting_edges:
+        if edge.parent_id not in setting_by_id or edge.child_id not in setting_by_id:
+            errors.append(
+                _error(
+                    "setting_edge_endpoint_missing",
+                    "Setting edge endpoint does not exist in settings.",
+                    object_kind="setting_edge",
+                    object_id=f"{edge.parent_id}->{edge.child_id}",
+                    evidence_span_ids=edge.evidence_span_ids,
+                )
+            )
+        errors.extend(
+            _missing_evidence_errors(
+                "setting_edge",
+                f"{edge.parent_id}->{edge.child_id}",
+                edge.evidence_span_ids,
+                evidence_by_id,
+            )
+        )
 
     for link in extraction.method_setting_links:
         if link.method_id not in node_by_id or link.setting_id not in setting_by_id:
@@ -146,6 +166,16 @@ def validate_extraction(
                 evidence_by_id,
             )
         )
+        if _is_explicit_zero(link.confidence) and link.evidence_span_ids:
+            errors.append(
+                _warning(
+                    "zero_confidence_default",
+                    "Grounded method-setting link has confidence=0.0; use null for unscored confidence.",
+                    object_kind="method_setting_link",
+                    object_id=f"{link.method_id}->{link.setting_id}",
+                    evidence_span_ids=link.evidence_span_ids,
+                )
+            )
 
     for outcome in extraction.outcomes:
         if outcome.paper_id != extraction.paper_id:
@@ -227,11 +257,25 @@ def validate_extraction(
                     evidence_span_ids=claim.evidence_span_ids,
                 )
             )
-        if claim.confidence <= 0 and claim.evidence_span_ids and _appears_in_evidence(claim.raw_text, claim.evidence_span_ids, evidence_by_id):
+        if not (claim.method_ids or claim.setting_ids or claim.outcome_ids):
+            errors.append(
+                _error(
+                    "claims_unattached",
+                    "Claim must attach to at least one method-family node, setting, or outcome.",
+                    object_kind="claim",
+                    object_id=claim.claim_id,
+                    evidence_span_ids=claim.evidence_span_ids,
+                )
+            )
+        if (
+            _is_explicit_zero(claim.confidence)
+            and claim.evidence_span_ids
+            and _appears_in_evidence(claim.raw_text, claim.evidence_span_ids, evidence_by_id)
+        ):
             errors.append(
                 _warning(
-                    "zero_confidence_grounded_claim",
-                    "Grounded claim should use meaningful confidence or omit confidence upstream.",
+                    "zero_confidence_default",
+                    "Grounded claim has confidence=0.0; use null for unscored confidence.",
                     object_kind="claim",
                     object_id=claim.claim_id,
                     evidence_span_ids=claim.evidence_span_ids,
@@ -264,6 +308,7 @@ def validate_extraction(
             )
 
     errors.extend(_cap_warnings(extraction, caps))
+    errors.extend(_evidence_span_warnings(extraction))
     return ExtractionValidationReport(errors=errors)
 
 
@@ -272,7 +317,8 @@ def _graph_shape_errors(extraction: PaperExtraction) -> list[ExtractionValidatio
         return []
 
     errors: list[ExtractionValidationError] = []
-    if not extraction.nodes and not extraction.edges and not extraction.claims:
+    graph_node_count = len(extraction.nodes) + len(extraction.settings)
+    if graph_node_count == 0 and not extraction.edges and not extraction.claims:
         errors.append(
             _error(
                 "extraction_graph_missing",
@@ -281,19 +327,19 @@ def _graph_shape_errors(extraction: PaperExtraction) -> list[ExtractionValidatio
         )
         return errors
 
+    if graph_node_count == 0 and extraction.claims:
+        errors.append(
+            _error(
+                "no_graph_nodes",
+                "Extraction has claims but no promoted systems, methods, or settings.",
+            )
+        )
+
     if not extraction.nodes and (extraction.edges or any(claim.method_ids for claim in extraction.claims)):
         errors.append(
             _error(
                 "graph_references_without_nodes",
                 "Edges or method-linked claims require declared method-family nodes.",
-            )
-        )
-
-    if extraction.demoted_items and not extraction.candidates:
-        errors.append(
-            _error(
-                "candidates_missing_for_demotions",
-                "Demoted items require candidate provenance so repair can promote or justify each candidate.",
             )
         )
 
@@ -384,9 +430,36 @@ def _numeric_grounding_findings(
     return findings
 
 
+def _evidence_span_warnings(extraction: PaperExtraction) -> list[ExtractionValidationError]:
+    warnings: list[ExtractionValidationError] = []
+    noisy_span_ids = [span.span_id for span in extraction.evidence_spans if _looks_like_figure_label_noise(span.text)]
+    if noisy_span_ids:
+        warnings.append(
+            _warning(
+                "figure_label_noise",
+                "Evidence spans contain isolated plot labels or tick values.",
+                evidence_span_ids=noisy_span_ids,
+            )
+        )
+    missing_page_ids = [
+        span.span_id
+        for span in extraction.evidence_spans
+        if span.page_start is None or span.page_end is None
+    ]
+    if missing_page_ids:
+        warnings.append(
+            _warning(
+                "no_page_provenance",
+                "Evidence spans have null page_start/page_end.",
+                evidence_span_ids=missing_page_ids,
+            )
+        )
+    return warnings
+
+
 def _cap_warnings(extraction: PaperExtraction, caps: ExtractionCaps) -> list[ExtractionValidationError]:
-    system_count = sum(1 for node in extraction.nodes if node.kind == "system")
-    method_count = sum(1 for node in extraction.nodes if node.kind == "method")
+    system_count = len(extraction.graph.systems)
+    method_count = len(extraction.graph.methods)
     checks = (
         ("system_node_count_high", "system nodes", system_count, caps.max_system_nodes),
         ("method_node_count_high", "method nodes", method_count, caps.max_method_nodes),
@@ -424,6 +497,30 @@ def _appears_in_evidence(value: str, evidence_span_ids: list[str], evidence_by_i
 
 def _contains_digit(value: str) -> bool:
     return any(char.isdigit() for char in value)
+
+
+def _is_explicit_zero(value: float | None) -> bool:
+    return value == 0.0
+
+
+def _looks_like_figure_label_noise(value: str) -> bool:
+    cleaned = " ".join(value.strip().split())
+    if not cleaned:
+        return False
+    if re.match(r"^(fig\.?|figure|table)\b", cleaned, flags=re.IGNORECASE):
+        return False
+    if re.search(r"[.!?]\s*$", cleaned):
+        return False
+    words = re.findall(r"[A-Za-z]+", cleaned)
+    if re.fullmatch(r"[\d.,]+[kKmM]?", cleaned):
+        return True
+    if len(words) <= 4 and re.search(r"\b(GB|MB|token/s|tokens/s|requests?|batch size|memory usage)\b", cleaned, flags=re.IGNORECASE):
+        return True
+    if len(words) <= 3 and re.search(r"[\d#%()]", cleaned):
+        return True
+    if len(words) <= 3 and cleaned.casefold() in {"others", "parameter size", "existing systems vllm", "vllm"}:
+        return True
+    return False
 
 
 def _claim_needs_structured_fields(claim: object) -> bool:

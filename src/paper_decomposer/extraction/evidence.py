@@ -40,6 +40,8 @@ def select_evidence_spans(
         for chunk_index, text in enumerate(_paragraph_chunks(section.body_text), start=1):
             if not text:
                 continue
+            if _is_isolated_visual_fragment(text):
+                continue
             if used_chars + len(text) > max_chars_per_stage and spans:
                 return spans
             spans.append(
@@ -129,6 +131,35 @@ def _artifact_source_kind(artifact: EvidenceArtifact) -> SourceKind:
     if artifact.artifact_type.lower() == "table":
         return "table_text"
     return "caption"
+
+
+def _is_isolated_visual_fragment(text: str) -> bool:
+    cleaned = " ".join(text.strip().split())
+    if not cleaned:
+        return True
+    if re.match(r"^(fig\.?|figure|table)\b", cleaned, flags=re.IGNORECASE):
+        return False
+    if re.search(r"[.!?]\s*$", cleaned):
+        return False
+    words = re.findall(r"[A-Za-z]+", cleaned)
+    if re.fullmatch(r"[\d.,]+[kKmM]?", cleaned):
+        return True
+    if len(words) <= 4 and re.search(
+        r"\b(GB|MB|token/s|tokens/s|requests?|batch size|memory usage)\b",
+        cleaned,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if len(words) <= 3 and re.search(r"[\d#%()]", cleaned):
+        return True
+    if len(words) <= 3 and cleaned.casefold() in {
+        "others",
+        "parameter size",
+        "existing systems vllm",
+        "vllm",
+    }:
+        return True
+    return False
 
 
 __all__ = ["select_evidence_spans"]

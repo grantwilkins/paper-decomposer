@@ -1,12 +1,28 @@
+# Extraction Invariant
+
+The extractor is graph-first.
+
+Every normal extraction run should produce, in this order:
+
+1. selected evidence spans;
+2. a paper-local graph sketch containing at least one system/method spine for systems papers;
+3. claims and outcomes extracted against that graph;
+4. deterministic validation;
+5. optional repair;
+6. DB mapping.
+
+The DB writer must never persist a claims-only extraction as a completed paper decomposition.
+
 # Architecture Overview
 
 The extraction stage turns a parsed paper into a paper-local method and evidence graph before any global merge or deduplication work happens.
 
 ```text
 ParsedPaper
-  -> EvidenceSpan selection
-  -> Cheap staged extraction
-  -> Paper-local extraction JSON
+  -> EvidenceSpanSet
+  -> GraphSketch
+  -> ClaimOutcomeDraft
+  -> PaperExtraction
   -> Deterministic validation
   -> Optional repair/adjudication
   -> Local-ID DB write plan
@@ -34,7 +50,7 @@ src/paper_decomposer/extraction/
   db_write_plan.py
 ```
 
-- `contracts.py`: Pydantic models for evidence spans, method-family nodes, settings, outcomes, claims, demoted items, extraction envelopes, validation severity, and validation errors.
+- `contracts.py`: Pydantic models for evidence spans, promoted paper-local graphs, method-family nodes, settings, outcomes, claims, demoted items, extraction envelopes, validation severity, and validation errors.
 - `evidence.py`: section selection, artifact inclusion, evidence span chunking, and provenance preservation.
 - `prompts.py`: short schema-bound prompt builders and extraction rules.
 - `stages.py`: budget-aware calls into `call_model` for sketching, method extraction, claim extraction, compression, and repair.
@@ -57,6 +73,30 @@ src/paper_decomposer/extraction/
 - `artifact_id`: optional parser artifact identifier.
 - `source_kind`: optional source type such as `paragraph`, `table_text`, `caption`, `abstract`, `contribution`, or `conclusion`.
 
+Evidence selection includes abstract, introduction, contribution, method/design sections, evaluation prose, captions, and parser-extracted table text when available. Isolated visual fragments such as axis labels, tick values, and one-word figure scraps should be filtered or preserved only as artifact context, not sent as ordinary prose spans.
+
+## PaperGraph
+
+Final `PaperExtraction` output centers the promoted graph:
+
+```json
+{
+  "graph": {
+    "systems": [],
+    "methods": [],
+    "method_edges": [],
+    "settings": [],
+    "setting_edges": [],
+    "method_setting_links": []
+  },
+  "claims": [],
+  "outcomes": [],
+  "demoted_items": []
+}
+```
+
+`candidates` belong only to intermediate stage outputs. A final extraction with empty `graph.systems`, `graph.methods`, and `graph.settings` but non-empty claims is a validation failure, not a completed decomposition.
+
 ## ExtractedNode
 
 - `local_node_id`: stable paper-local node identifier.
@@ -73,23 +113,23 @@ src/paper_decomposer/extraction/
 
 Create method nodes only for reusable mechanisms that pass the method-node test: can one sentence specify the method's inputs, outputs, and operative move?
 
-`PaperExtraction.nodes` should contain only method-family objects. `PaperExtraction.settings` should contain applications, tasks, datasets, workloads, hardware, model artifacts, and metrics. Keeping the two families separate matches the current database shape and avoids ambiguity during assembly and persistence.
+`PaperGraph.systems` and `PaperGraph.methods` contain only method-family objects. `PaperGraph.settings` contains applications, tasks, datasets, workloads, hardware, model artifacts, and metrics. Keeping the two families separate matches the current database shape and avoids ambiguity during assembly and persistence.
 
 ## ExtractedEdge
 
 - `parent_id`: local parent node identifier.
 - `child_id`: local child node identifier.
-- `relation_kind`: `uses`, `is_a`, or `refines` in paper-local JSON.
+- `relation_kind`: `uses`, `is_a`, `refines`, or `composes` in paper-local JSON.
 - `evidence_span_ids`: cited evidence spans.
 - `confidence`: extraction confidence.
 
-The current database allows `is_a`, `specializes`, `composes`, and `refines` for method and setting edges. Method-family relationships use `uses`, `is_a`, or `refines`. Cross-family applicability uses `ExtractedMethodSettingLink` and must not be written to `method_edges`.
+The current database allows `is_a`, `specializes`, `composes`, and `refines` for method and setting edges. Method-family relationships use `uses`, `is_a`, `refines`, or `composes`. Cross-family applicability uses `ExtractedMethodSettingLink` and must not be written to `method_edges`.
 
 ## ExtractedMethodSettingLink
 
 - `method_id`: local method-family node identifier.
 - `setting_id`: local setting identifier.
-- `relation_kind`: `applies_to` or `evaluated_on`.
+- `relation_kind`: `applies_to`, `evaluated_on`, or `uses_artifact`.
 - `evidence_span_ids`: cited evidence spans.
 - `confidence`: extraction confidence.
 
@@ -104,6 +144,16 @@ The current database allows `is_a`, `specializes`, `composes`, and `refines` for
 - `confidence`: extraction confidence.
 
 The current `settings.kind` enum supports `dataset`, `task`, `application`, `workload`, `hardware`, `model_artifact`, and `metric`.
+
+## ExtractedSettingEdge
+
+- `parent_id`: local parent setting identifier.
+- `child_id`: local child setting identifier.
+- `relation_kind`: `is_a`, `composes`, `specializes`, or `refines`.
+- `evidence_span_ids`: cited evidence spans.
+- `confidence`: extraction confidence.
+
+Setting relationships belong in `graph.setting_edges`; do not encode setting hierarchy or method applicability inside `graph.method_edges`.
 
 ## ExtractedOutcome
 
@@ -168,7 +218,17 @@ Blocking errors prevent DB writes. Warnings are reported and may become errors t
 
 The implementation describes logical extractors but runs only four actual model calls for a normal paper.
 
-## Frontmatter and Contribution Sketch
+Normal cheap call plan:
+
+```text
+Call 1: GraphSketch from abstract + intro + contribution + method headings
+Call 2: MethodGraphRefinement from selected method/design sections
+Call 3: ClaimOutcomeDraft from evaluation prose + conclusion + table text
+Call 4: AttachmentCompression into PaperExtraction
+Call 5: Repair only if validation fails
+```
+
+## GraphSketch
 
 Input:
 
@@ -184,21 +244,24 @@ Output:
 - Central problem candidates.
 - Contribution spans.
 - Candidate systems, methods, settings, and scenarios.
+- Promoted draft `graph.systems`, `graph.methods`, `graph.method_edges`, `graph.settings`, and `graph.method_setting_links` when frontmatter supports them.
 - High-level central primitive guess.
 
 Model tier: medium by default. Small models remain configurable for cheap experiments, but the default should favor structured-output reliability.
 
-## Method DAG Candidate Extraction
+For vLLM, abstract + introduction should already yield `vLLM` and `PagedAttention`. For ORCA, the same pass should yield `ORCA`, `iteration-level scheduling`, and `selective batching`.
+
+## Method Graph Refinement
 
 Input:
 
 - High-signal method, design, architecture, algorithm, system, and implementation-overview sections.
-- Frontmatter and contribution sketch output.
+- GraphSketch output.
 
 Output:
 
-- Candidate method nodes.
-- Candidate setting nodes.
+- Promoted method-family graph nodes.
+- Promoted setting nodes.
 - Method-node-test decisions.
 - Demoted items.
 - Draft edges.
@@ -212,15 +275,14 @@ Input:
 - Evaluation sections.
 - Conclusion.
 - Parser-extracted table text and captions when available.
-- Candidate node names from prior stages.
+- Graph node names from prior stages.
 
 Output:
 
-- Claims.
-- Outcomes.
+- Claims attached to existing graph objects.
+- Explicit outcomes attached to existing graph objects when possible.
 - Metrics.
 - Baselines.
-- Settings.
 - Evidence spans.
 
 Model tier: medium by default. Small models remain configurable for cheap experiments, but the default should favor structured-output reliability.
@@ -236,7 +298,7 @@ Input:
 
 Output:
 
-- Final paper-local extraction JSON.
+- Final paper-local extraction JSON with a `graph` object and no final `candidates` field.
 - Claims attached to the most specific valid node.
 - Demoted items preserved.
 - Graph compressed away from paper-outline structure.
@@ -288,11 +350,13 @@ Deterministic validators run before any DB write and before escalation to a stro
 Checks:
 
 - Evidence spans without graph objects are a failed extraction, not a valid dry run.
+- Claims without promoted systems, methods, or settings are a failed extraction.
+- Claims must link to at least one method-family node, setting, or outcome.
 - A graph with method-family nodes must include a system root.
 - Multiple method-family nodes must include method DAG edges.
 - A method graph must include at least one grounded claim.
 - Every edge endpoint exists.
-- Every claim has at least one evidence span.
+- Every claim has at least one evidence span and at least one graph/outcome attachment.
 - Every method node has a mechanism sentence.
 - Every method node has a granularity rationale.
 - Every numeric value appears in evidence text when possible.
@@ -304,10 +368,13 @@ Checks:
 - Landmark systems papers usually have 5-10 method nodes, not 30 or more.
 - Scenario variants are not promoted into separate method nodes unless each passes the method-node test.
 - Claims do not rely on visual impressions from figures.
+- Isolated plot labels and tick values in evidence spans are warning-worthy noise.
 
 Blocking errors:
 
 - Evidence spans but no method-family nodes, edges, or claims.
+- Claims exist but no promoted systems, methods, or settings exist.
+- Claim has no method, setting, or outcome link.
 - Missing system root.
 - Multiple method-family nodes without method DAG edges.
 - Method graph with no grounded claims.

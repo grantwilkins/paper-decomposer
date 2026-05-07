@@ -3,11 +3,15 @@ from __future__ import annotations
 from .contracts import EvidenceSpan, ExtractionValidationError
 
 RULES = (
-    "Return JSON only. Use only supplied evidence span IDs. Do not invent evidence. "
+    "Return JSON only. The extractor is graph-first: build the paper-local method/settings graph before claims. "
+    "Use only supplied evidence span IDs. Do not invent evidence. "
     "Do not create paper-section nodes. Method nodes need inputs, outputs, and operative move. "
     "Return a sparse method DAG, not a paper outline or evidence-span list. "
-    "Put scenarios, datasets, hardware, models, and metrics in settings. "
+    "Put scenarios, datasets, hardware, models, and metrics in graph.settings. "
+    "Use graph.method_edges only for method/system relationships; use graph.setting_edges for setting relationships; "
+    "use graph.method_setting_links for applies_to, evaluated_on, and uses_artifact. "
     "Claim raw_text must copy source text when possible; finding is the paraphrase. "
+    "Claims must attach to the most specific existing graph node, setting, or outcome. "
     "Do not infer OCR, plots, charts, or visual content."
 )
 
@@ -40,7 +44,8 @@ def frontmatter_prompt(spans: list[EvidenceSpan]) -> list[dict[str, str]]:
         {"role": "system", "content": _system_prompt()},
         {
             "role": "user",
-            "content": "Sketch paper metadata, problem, contribution spans, and candidate reusable mechanisms.\n\n"
+            "content": "Produce GraphSketch JSON from frontmatter: paper metadata, central problem, systems, methods, settings, "
+            "and tentative graph edges. Do not extract claims yet.\n\n"
             + _format_spans(spans),
         },
     ]
@@ -51,7 +56,7 @@ def method_graph_prompt(spans: list[EvidenceSpan], sketch_json: str) -> list[dic
         {"role": "system", "content": _system_prompt()},
         {
             "role": "user",
-            "content": "Apply the method-node test and draft method/settings graph JSON.\n\n"
+            "content": "Refine the GraphSketch into a compact method/settings graph. Do not extract claims yet.\n\n"
             f"Sketch:\n{sketch_json}\n\nEvidence:\n{_format_spans(spans)}",
         },
     ]
@@ -62,7 +67,8 @@ def claims_outcomes_prompt(spans: list[EvidenceSpan], graph_json: str) -> list[d
         {"role": "system", "content": _system_prompt()},
         {
             "role": "user",
-            "content": "Extract grounded claims and explicit outcomes. Preserve numeric text exactly.\n\n"
+            "content": "Extract grounded claims and explicit outcomes against the supplied graph. Preserve numeric text exactly. "
+            "Do not emit floating claims; every claim must link to method_ids, setting_ids, or outcome_ids.\n\n"
             f"Graph:\n{graph_json}\n\nEvidence:\n{_format_spans(spans)}",
         },
     ]
@@ -73,8 +79,10 @@ def compression_prompt(graph_json: str, claims_json: str) -> list[dict[str, str]
         {"role": "system", "content": _system_prompt()},
         {
             "role": "user",
-            "content": "Compress to final paper-local extraction JSON. Required: system root, method nodes, "
-            "method DAG edges, and grounded claims. Keep method-family nodes separate from settings. "
+            "content": "Compress to final PaperExtraction JSON with graph.systems, graph.methods, graph.method_edges, "
+            "graph.settings, graph.setting_edges, graph.method_setting_links, claims, outcomes, and demoted_items. "
+            "Do not include final candidates. Required: system root, method nodes, method DAG edges, and grounded claims. "
+            "Keep method-family nodes separate from settings. "
             "Do not put applies_to in method edges. Every method node must include mechanism_sentence. "
             "Do not create nodes named after section headings. Preserve major claims from the claims input.\n\n"
             f"Graph:\n{graph_json}\n\nClaims and outcomes:\n{claims_json}",
@@ -96,7 +104,7 @@ def repair_prompt(
         {
             "role": "user",
             "content": "Repair this extraction JSON so deterministic validation passes. "
-            "If extraction_graph_missing, system_node_missing, method_edges_missing, or claims_missing appears, "
+            "If no_graph_nodes, claims_unattached, extraction_graph_missing, system_node_missing, method_edges_missing, or claims_missing appears, "
             "produce a sparse paper-local method DAG with a system root, method edges, and grounded claims. "
             "For method_missing_mechanism_sentence, add a grounded mechanism_sentence with inputs, outputs, "
             "and operative move when the node names a concrete reusable mechanism. Only demote vague section-shaped "
