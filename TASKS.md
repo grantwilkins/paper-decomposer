@@ -32,7 +32,7 @@ Finish the path from validated paper-local extraction JSON to durable Postgres r
 ## Remaining Extraction Work
 
 - Preserve grounded settings, claims, and explicit outcomes through compression and repair; the vLLM fixture should keep model artifacts, workloads, hardware, throughput claims, and memory claims when they appear in selected evidence.
-- Add fixture smoke expectations that vLLM extraction retains `PagedAttention` and at least one grounded performance or memory claim.
+- Add fixture smoke expectations that vLLM extraction retains the system -> PagedAttention -> reusable KV-cache mechanism shape, demotes implementation details, and preserves at least one grounded performance or memory claim.
 - Decide whether `require_numeric_grounding` should block extraction by default or only in DB-write mode.
 - Add optional preflight for only the model tiers used in the current run.
 - Keep visual figure extraction out of scope unless a future explicit feature adds it.

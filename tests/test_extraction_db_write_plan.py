@@ -16,6 +16,7 @@ import pytest
 
 from paper_decomposer.extraction.contracts import (
     EvidenceSpan,
+    ExtractedClaim,
     ExtractedEdge,
     ExtractedMethodSettingLink,
     ExtractedNode,
@@ -73,6 +74,18 @@ def _extraction() -> PaperExtraction:
                 method_id="m1",
                 setting_id="model-1",
                 relation_kind="applies_to",
+                evidence_span_ids=["s1"],
+            )
+        ],
+        claims=[
+            ExtractedClaim(
+                claim_id="claim-1",
+                paper_id="paper-1",
+                claim_type="capability",
+                raw_text="PagedAttention maps logical KV cache blocks to physical blocks on demand for LLaMA-13B.",
+                finding="PagedAttention maps logical KV cache blocks to physical blocks on demand.",
+                method_ids=["m1"],
+                setting_ids=["model-1"],
                 evidence_span_ids=["s1"],
             )
         ],

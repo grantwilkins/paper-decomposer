@@ -287,6 +287,10 @@ Deterministic validators run before any DB write and before escalation to a stro
 
 Checks:
 
+- Evidence spans without graph objects are a failed extraction, not a valid dry run.
+- A graph with method-family nodes must include a system root.
+- Multiple method-family nodes must include method DAG edges.
+- A method graph must include at least one grounded claim.
 - Every edge endpoint exists.
 - Every claim has at least one evidence span.
 - Every method node has a mechanism sentence.
@@ -303,6 +307,10 @@ Checks:
 
 Blocking errors:
 
+- Evidence spans but no method-family nodes, edges, or claims.
+- Missing system root.
+- Multiple method-family nodes without method DAG edges.
+- Method graph with no grounded claims.
 - Missing evidence span.
 - Missing edge endpoint.
 - Invalid enum value.
@@ -426,8 +434,23 @@ vLLM
     |-- uses on-demand KV block allocation
     |-- uses block-level KV cache sharing
     |   `-- uses KV block copy-on-write
+    |-- uses block-size-tuned paged KV layout
     `-- uses sequence-group preemption
+        |-- uses KV-cache swapping
+        `-- uses KV-cache recomputation
 ```
+
+For vLLM-like systems papers, decoding scenarios are usually settings or claim contexts:
+
+```text
+PagedAttention
+`-- uses block-level KV cache sharing
+    |-- applies_to application:parallel sampling
+    |-- applies_to application:beam search
+    `-- applies_to application:shared-prefix prompting
+```
+
+Keep applicability out of method edges. Use `method_setting_links` for `applies_to`.
 
 Useful granularity examples:
 
@@ -437,6 +460,15 @@ Useful granularity examples:
 - `PagedAttention` is a valid method.
 - `Block-wise KV cache address translation` is a valid method.
 - `Fused block copy kernel` is usually an implementation detail unless the paper presents it as a reusable mechanism with clear inputs, outputs, and operative move.
+- `Parallel sampling`, `beam search`, `shared-prefix prompting`, and `chatbot serving` are usually applications/settings in a vLLM-like extraction, not child methods of PagedAttention.
+- `Fork`, `append`, and `free` are support APIs unless the paper frames them as reusable mechanisms.
+
+Claim attachment examples:
+
+- Overall vLLM throughput claims attach to the `system:vLLM` node.
+- Paged KV layout, memory waste, and kernel-overhead claims attach to `method:PagedAttention` or the most specific supporting KV-cache mechanism.
+- Parallel sampling and beam-search sharing claims attach to `method:block-level KV cache sharing`, with the scenario represented as a setting or claim context.
+- Swapping-versus-recomputation tradeoffs attach to `method:sequence-group preemption`.
 
 # Current Testing Strategy
 
