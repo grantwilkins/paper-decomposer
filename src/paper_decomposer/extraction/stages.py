@@ -23,6 +23,7 @@ from .contracts import (
 )
 from .prompts import (
     claims_outcomes_prompt,
+    cleanup_prompt,
     compression_prompt,
     frontmatter_prompt,
     method_graph_prompt,
@@ -174,6 +175,24 @@ async def repair_paper_extraction(
     )
 
 
+async def cleanup_paper_extraction(
+    extraction: PaperExtraction,
+    validation_issues: list[ExtractionValidationError],
+    *,
+    config: Any,
+) -> ExtractionDraft:
+    return await call_model(
+        _adjudication_model_tier(config),
+        cleanup_prompt(
+            extraction.model_dump_json(exclude={"evidence_spans"}),
+            validation_issues,
+            extraction.evidence_spans,
+        ),
+        response_schema=ExtractionDraft,
+        config=config,
+    )
+
+
 def _default_model_tier(config: Any) -> ModelTier:
     return _model_tier_from_config(config, key="default_model_tier", default="small")
 
@@ -234,6 +253,7 @@ __all__ = [
     "FrontmatterSketch",
     "GraphSketch",
     "MethodGraphDraft",
+    "cleanup_paper_extraction",
     "compress_paper_extraction",
     "extract_claims_and_outcomes",
     "extract_frontmatter_sketch",

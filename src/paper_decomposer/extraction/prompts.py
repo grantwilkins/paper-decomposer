@@ -122,6 +122,33 @@ def repair_prompt(
     ]
 
 
+def cleanup_prompt(
+    extraction_json: str,
+    validation_issues: list[ExtractionValidationError],
+    evidence_spans: list[EvidenceSpan],
+) -> list[dict[str, str]]:
+    issues = "\n".join(
+        f"- {issue.code}: {issue.object_kind or ''} {issue.object_id or ''} {issue.message}".strip()
+        for issue in validation_issues
+    )
+    if not issues:
+        issues = "- none"
+    return [
+        {"role": "system", "content": _system_prompt()},
+        {
+            "role": "user",
+            "content": "Run a final heavy-model cleanup pass on this validated paper-local extraction. "
+            "Return a complete ExtractionDraft JSON with graph, outcomes, claims, and demoted_items. "
+            "Preserve valid graph structure and grounded claims unless supplied evidence requires a specific fix. "
+            "Improve only extraction-contract issues: ID consistency, setting deduplication, claim attachment, "
+            "method topology, metric/value/baseline/comparator fields, outcome rows, and demotion decisions. "
+            "Do not invent evidence, do not drop major claims, and keep only supplied evidence IDs.\n\n"
+            f"Validation issues and warnings:\n{issues}\n\nExtraction JSON:\n{extraction_json}\n\n"
+            f"Evidence:\n{_format_spans(evidence_spans, max_span_chars=1200)}",
+        },
+    ]
+
+
 def _format_spans(spans: list[EvidenceSpan], *, max_span_chars: int = 1800) -> str:
     lines: list[str] = []
     for span in spans:
@@ -140,6 +167,7 @@ __all__ = [
     "CALIBRATION",
     "RULES",
     "claims_outcomes_prompt",
+    "cleanup_prompt",
     "compression_prompt",
     "frontmatter_prompt",
     "method_graph_prompt",

@@ -21,7 +21,7 @@ Claims may be extracted only after graph nodes exist. If claims exist but no gra
 - Final `PaperExtraction` emits promoted graph fields under `graph`, not final `candidates`.
 - Claims-only extractions fail validation with graph and attachment errors.
 - Deterministic cleanup normalizes method/system IDs, collapses duplicate named settings, repairs obvious vLLM-like topology, demotes component details, and materializes explicit numeric outcomes when claims contain enough text.
-- Normal compression and optional repair use cheap/reliable configured tiers; large-model adjudication is configured but disabled by default.
+- Normal compression and optional repair use cheap/reliable configured tiers; the heavy adjudication tier runs once as final cleanup before final validation.
 - CLI extraction dry run is implemented with `--extract --output-json`.
 - A local-ID DB write plan is implemented.
 - The schema has extraction runs, evidence spans, evidence links, setting edges, method-setting links, model artifacts, and metrics.
@@ -47,7 +47,7 @@ Claims may be extracted only after graph nodes exist. If claims exist but no gra
 
 - Preserve grounded settings, claims, and explicit outcomes through compression and repair; the vLLM fixture should keep model artifacts, workloads, hardware, throughput claims, and memory claims when they appear in selected evidence.
 - Add fixture smoke expectations that vLLM extraction retains the system -> PagedAttention -> reusable KV-cache mechanism shape, demotes implementation details, and preserves at least one grounded performance or memory claim.
-- Implement targeted large-model adjudication packets for unresolved validation failures; do not add a full-paper large-model rewrite path.
+- Narrow final heavy cleanup into targeted adjudication packets once the validator failure taxonomy is stable.
 - Decide whether `require_numeric_grounding` should block extraction by default or only in DB-write mode.
 - Add optional preflight for only the model tiers used in the current run.
 - Keep visual figure extraction out of scope unless a future explicit feature adds it.

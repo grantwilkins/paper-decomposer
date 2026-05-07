@@ -44,11 +44,12 @@ def test_extraction_defaults_to_medium_tier(monkeypatch: pytest.MonkeyPatch) -> 
 
     settings = load_config(CONFIG_PATH)
 
+    assert settings.pipeline.extraction["max_model_calls_per_paper"] == 6
     assert settings.pipeline.extraction["default_model_tier"] == "medium"
     assert settings.pipeline.extraction["repair_model_tier"] == "medium"
     assert settings.pipeline.extraction["adjudication_model_tier"] == "heavy"
-    assert settings.pipeline.extraction["enable_large_model_adjudication"] is False
-    assert "ambiguous_claim_attachment" in settings.pipeline.extraction["large_model_only_for"]
+    assert settings.pipeline.extraction["enable_large_model_adjudication"] is True
+    assert settings.pipeline.extraction["large_model_only_for"] == ["final_cleanup"]
     assert settings.raw.models.medium.model == "openai/gpt-oss-120b"
     assert settings.raw.models.medium.reasoning_effort == "low"
     assert settings.pipeline.extraction["require_numeric_grounding"] is False

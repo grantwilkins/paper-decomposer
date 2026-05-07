@@ -9,6 +9,7 @@ from .extraction.contracts import ExtractionCaps, PaperExtraction
 from .extraction.evidence import select_evidence_spans
 from .extraction.sanitize import demote_invalid_method_nodes, preserve_graph_and_attach_claims
 from .extraction.stages import (
+    cleanup_paper_extraction,
     compress_paper_extraction,
     extract_claims_and_outcomes,
     extract_frontmatter_sketch,
@@ -36,6 +37,7 @@ async def extract_paper(pdf_path: str, config_path: str = "config.yaml") -> Pape
 async def extract_document(document: PaperDocument, *, config: Any) -> PaperExtraction:
     extraction_config = _extraction_config(config)
     max_model_calls = int(extraction_config.get("max_model_calls_per_paper", 5))
+    heavy_cleanup_enabled = _heavy_cleanup_enabled(extraction_config)
     if extraction_config.get("enabled") is False:
         raise ValueError("Extraction is disabled by pipeline.extraction.enabled.")
     if extraction_config.get("enable_visual_figure_extraction") is True:
@@ -75,14 +77,18 @@ async def extract_document(document: PaperDocument, *, config: Any) -> PaperExtr
         caps=caps,
         require_numeric_grounding=bool(extraction_config.get("require_numeric_grounding", False)),
     )
+    used_repair = False
     if report.blocking_errors:
-        if max_model_calls < 5:
+        required_calls = 6 if heavy_cleanup_enabled else 5
+        if max_model_calls < required_calls:
             codes = ", ".join(error.code for error in report.blocking_errors)
+            repair_path = "repair plus large-model cleanup" if heavy_cleanup_enabled else "repair"
             raise ValueError(
-                "Extraction failed deterministic validation and repair is outside the model-call budget: "
+                f"Extraction failed deterministic validation and {repair_path} is outside the model-call budget: "
                 f"{codes}"
             )
         repaired = await repair_paper_extraction(extraction, report.blocking_errors, config=config)
+        used_repair = True
         extraction = assemble_extraction(
             paper_id=paper_id,
             extraction_run_id=extraction_run_id,
@@ -101,6 +107,30 @@ async def extract_document(document: PaperDocument, *, config: Any) -> PaperExtr
         if report.blocking_errors:
             codes = ", ".join(error.code for error in report.blocking_errors)
             raise ValueError(f"Extraction failed deterministic validation after repair: {codes}")
+    if heavy_cleanup_enabled:
+        required_calls = 6 if used_repair else 5
+        if max_model_calls < required_calls:
+            raise ValueError("Extraction large-model cleanup is outside the model-call budget.")
+        fallback_graph = extraction.graph
+        cleaned = await cleanup_paper_extraction(extraction, report.errors, config=config)
+        extraction = assemble_extraction(
+            paper_id=paper_id,
+            extraction_run_id=extraction_run_id,
+            title=document.metadata.title,
+            evidence_spans=spans,
+            final=cleaned,
+        )
+        extraction = preserve_graph_and_attach_claims(extraction, fallback_graph=fallback_graph)
+        extraction = demote_invalid_method_nodes(extraction)
+        extraction = preserve_graph_and_attach_claims(extraction, fallback_graph=fallback_graph)
+        report = validate_extraction(
+            extraction,
+            caps=caps,
+            require_numeric_grounding=bool(extraction_config.get("require_numeric_grounding", False)),
+        )
+        if report.blocking_errors:
+            codes = ", ".join(error.code for error in report.blocking_errors)
+            raise ValueError(f"Extraction failed deterministic validation after large-model cleanup: {codes}")
     return extraction
 
 
@@ -132,6 +162,10 @@ def _extraction_config(config: Any) -> dict[str, Any]:
     if isinstance(extraction, dict):
         return extraction
     return {}
+
+
+def _heavy_cleanup_enabled(extraction_config: dict[str, Any]) -> bool:
+    return bool(extraction_config.get("enable_large_model_adjudication", False))
 
 
 def _extraction_caps(extraction_config: dict[str, Any]) -> ExtractionCaps:

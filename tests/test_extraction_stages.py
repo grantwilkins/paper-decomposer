@@ -1,14 +1,16 @@
 """
 Claim:
 LLM extraction stages use cheap/default tiers for normal draft work, reserve
-repair_model_tier for the optional repair call, and never leak the nonexistent
-`cheap` tier into the Together client.
+repair_model_tier for the optional repair call, reserve adjudication_model_tier
+for final heavy cleanup, and never leak the nonexistent `cheap` tier into the
+Together client.
 
 Plausible wrong implementations:
 - Pass `cheap` directly to `call_model` even though runtime tiers are small,
   medium, and heavy.
 - Ignore extraction config and always call a stronger model.
 - Route normal compression or cheap repair through the large adjudication tier.
+- Route final cleanup through the normal draft tier instead of the adjudication tier.
 - Build stage prompts without evidence span IDs, making grounding impossible.
 """
 
@@ -26,6 +28,7 @@ from paper_decomposer.extraction.stages import (
     ExtractionDraft,
     FrontmatterSketch,
     MethodGraphDraft,
+    cleanup_paper_extraction,
     compress_paper_extraction,
     extract_frontmatter_sketch,
     repair_paper_extraction,
@@ -116,3 +119,54 @@ def test_repair_uses_repair_tier_not_large_adjudication(monkeypatch: pytest.Monk
 
     assert calls[0]["tier"] == "small"
     assert calls[0]["response_schema"] is ExtractionDraft
+
+
+def test_cleanup_uses_adjudication_tier_and_includes_validation_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_call_model(tier: str, messages: list[dict[str, str]], response_schema: type, config: Any) -> Any:
+        calls.append({"tier": tier, "messages": messages, "response_schema": response_schema})
+        return ExtractionDraft()
+
+    monkeypatch.setattr("paper_decomposer.extraction.stages.call_model", fake_call_model)
+    config = SimpleNamespace(
+        pipeline=SimpleNamespace(
+            extraction={
+                "default_model_tier": "medium",
+                "repair_model_tier": "medium",
+                "adjudication_model_tier": "heavy",
+            }
+        )
+    )
+    extraction = PaperExtraction(
+        paper_id="paper-1",
+        extraction_run_id="run-1",
+        title="Tiny",
+        evidence_spans=[
+            EvidenceSpan(
+                span_id="s1",
+                paper_id="paper-1",
+                section_title="Evaluation",
+                section_kind="evaluation",
+                text="Tiny System sustains 2x higher request rate.",
+            )
+        ],
+    )
+    issues = [
+        ExtractionValidationError(
+            code="structured_claim_without_outcome",
+            message="Claim has metric and comparison fields but no outcome.",
+            severity=ValidationSeverity.warning,
+            object_kind="claim",
+            object_id="c1",
+        )
+    ]
+
+    asyncio.run(cleanup_paper_extraction(extraction, issues, config=config))
+
+    assert calls[0]["tier"] == "heavy"
+    assert calls[0]["response_schema"] is ExtractionDraft
+    assert "structured_claim_without_outcome" in calls[0]["messages"][1]["content"]
+    assert "[s1]" in calls[0]["messages"][1]["content"]

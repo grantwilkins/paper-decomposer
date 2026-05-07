@@ -9,7 +9,8 @@ Every normal extraction run should produce, in this order:
 3. claims and outcomes extracted against that graph;
 4. deterministic validation;
 5. optional repair;
-6. DB mapping.
+6. final heavy cleanup;
+7. DB mapping.
 
 The DB writer must never persist a claims-only extraction as a completed paper decomposition.
 
@@ -24,7 +25,8 @@ ParsedPaper
   -> ClaimOutcomeDraft
   -> PaperExtraction
   -> Deterministic validation
-  -> Optional repair/adjudication
+  -> Optional repair
+  -> Final heavy cleanup
   -> Local-ID DB write plan
   -> Future live DB writer
 ```
@@ -216,7 +218,7 @@ Blocking errors prevent DB writes. Warnings are reported and may become errors t
 
 # LLM Stage Design
 
-The implementation describes logical extractors but runs only four actual model calls for a normal paper.
+The implementation describes logical extractors but runs five actual model calls for a normal valid paper, or six when model repair is needed before cleanup.
 
 Normal cheap call plan:
 
@@ -226,6 +228,7 @@ Call 2: MethodGraphRefinement from selected method/design sections
 Call 3: ClaimOutcomeDraft from evaluation prose + conclusion + table text
 Call 4: AttachmentCompression into PaperExtraction
 Call 5: Repair only if validation fails
+Call 5 or 6: Heavy cleanup after deterministic validation/repair
 ```
 
 ## GraphSketch
@@ -305,23 +308,22 @@ Output:
 
 Model tier: same as the default extraction tier. This is still part of the cheap draft path, not a large-model cleanup pass.
 
-## Repair and Adjudication
-
-Run only when deterministic validation fails.
+## Repair and Heavy Cleanup
 
 - Deterministic normalization runs before any repair call: normalize local IDs, collapse duplicate settings, prune invalid references, attach obvious system claims, and create outcome rows from structured numeric claims.
 - The optional repair call uses `repair_model_tier`, normally the same cheap/reliable tier as drafting.
-- A heavier adjudication model is disabled by default and should only receive small validator-triggered packets for unresolved ambiguity, not the whole paper JSON.
-- Large-model adjudication is reserved for repeated validation failure, ambiguous claim attachment, graph topology conflicts, or high-value fixtures.
+- The configured heavier adjudication model runs once at the end of extraction for final cleanup.
+- Final cleanup receives the post-normalization extraction JSON plus validator warnings/errors and must still pass deterministic validation afterward.
 
 The core policy is:
 
 ```text
-Cheap model proposes.
+Cheap/reliable model proposes.
 Code normalizes.
 Validators reject.
-Cheap model repairs once.
-Large model adjudicates only the unresolved diff.
+Cheap/reliable model repairs once if needed.
+Large model cleans the final extraction.
+Validators reject invalid cleanup output.
 ```
 
 # Prompting Strategy
@@ -452,7 +454,7 @@ Cost efficiency is a first-class requirement.
 - Use the smallest reliable Together-hosted model by default.
 - Retry malformed JSON once with the configured stage tier.
 - Run deterministic repair before model repair.
-- Keep large-model adjudication disabled unless a small targeted failure packet is required.
+- Run one configured heavy cleanup call at the end of extraction.
 - Track cost using the existing cost tracker in `models.py`.
 - Expose cost summary in the CLI.
 - Make model tiers configurable in `config.yaml`.
@@ -462,17 +464,14 @@ Suggested configuration:
 ```yaml
 extraction:
   enabled: true
-  max_model_calls_per_paper: 5
+  max_model_calls_per_paper: 6
   max_input_chars_per_stage: 50000
   default_model_tier: medium
   repair_model_tier: medium
   adjudication_model_tier: heavy
-  enable_large_model_adjudication: false
+  enable_large_model_adjudication: true
   large_model_only_for:
-    - repeated_validation_failure
-    - ambiguous_claim_attachment
-    - graph_topology_conflict
-    - high_value_fixture
+    - final_cleanup
   enable_visual_figure_extraction: false
   include_captions: true
   include_table_text: true
