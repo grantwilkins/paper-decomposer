@@ -105,13 +105,14 @@ async def extract_document(document: PaperDocument, *, config: Any) -> PaperExtr
             require_numeric_grounding=bool(extraction_config.get("require_numeric_grounding", False)),
         )
         if report.blocking_errors:
-            codes = ", ".join(error.code for error in report.blocking_errors)
-            raise ValueError(f"Extraction failed deterministic validation after repair: {codes}")
+            if not heavy_cleanup_enabled:
+                codes = ", ".join(error.code for error in report.blocking_errors)
+                raise ValueError(f"Extraction failed deterministic validation after repair: {codes}")
     if heavy_cleanup_enabled:
         required_calls = 6 if used_repair else 5
         if max_model_calls < required_calls:
             raise ValueError("Extraction large-model cleanup is outside the model-call budget.")
-        fallback_graph = extraction.graph
+        fallback_graph = extraction.graph if extraction.nodes or extraction.settings else fallback_graph
         cleaned = await cleanup_paper_extraction(extraction, report.errors, config=config)
         extraction = assemble_extraction(
             paper_id=paper_id,

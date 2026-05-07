@@ -1,12 +1,15 @@
 """
 Claim:
 When large-model adjudication is enabled, extraction runs a final heavy cleanup
-after the draft has passed deterministic normalization and validation.
+after deterministic normalization, including when the medium repair attempt still
+leaves blocking validation errors.
 
 Plausible wrong implementations:
 - Skip the final cleanup even though the config enables it.
 - Run cleanup before deterministic graph preservation and claim attachment.
 - Spend a cleanup call when the configured model-call budget cannot cover it.
+- Abort after a failed medium repair instead of giving heavy cleanup the failing
+  extraction and validator errors.
 - Let cleanup bypass the final deterministic validation gate.
 """
 
@@ -134,6 +137,61 @@ def test_extract_document_respects_heavy_cleanup_call_budget(monkeypatch: pytest
                 config=_config(max_calls=4, enable_large_model_adjudication=True),
             )
         )
+
+
+def test_extract_document_runs_heavy_cleanup_after_failed_medium_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_issue_codes: list[str] = []
+
+    async def fake_frontmatter(spans, *, config):
+        return SimpleNamespace(candidates=[], model_dump_json=lambda: "{}")
+
+    async def fake_method_graph(spans, sketch, *, config):
+        return _tiny_method_graph("paper-id:section:1:span:1")
+
+    async def fake_claims(spans, graph, *, config):
+        return SimpleNamespace(model_dump_json=lambda: "{}")
+
+    async def fake_compress(graph, claims, *, config):
+        return ExtractionDraft()
+
+    async def fake_repair(extraction: PaperExtraction, validation_errors, *, config):
+        assert any(error.code == "claims_missing" for error in validation_errors)
+        return ExtractionDraft()
+
+    async def fake_cleanup(extraction: PaperExtraction, validation_issues, *, config):
+        cleanup_issue_codes.extend(issue.code for issue in validation_issues)
+        span_id = extraction.evidence_spans[0].span_id
+        graph = _tiny_method_graph(span_id).graph
+        return ExtractionDraft(
+            graph=graph,
+            claims=[
+                ExtractedClaim(
+                    claim_id="c1",
+                    paper_id=extraction.paper_id,
+                    claim_type="capability",
+                    raw_text="TinyAttention maps logical cache blocks to physical cache blocks on demand.",
+                    finding="TinyAttention maps logical cache blocks to physical cache blocks on demand.",
+                    method_ids=["m1"],
+                    evidence_span_ids=[span_id],
+                )
+            ],
+        )
+
+    _patch_common_stages(monkeypatch, fake_frontmatter, fake_method_graph, fake_claims, fake_compress, fake_repair)
+    monkeypatch.setattr("paper_decomposer.pipeline.cleanup_paper_extraction", fake_cleanup)
+
+    extraction = asyncio.run(
+        extract_document(
+            _tiny_document(),
+            config=_config(max_calls=6, enable_large_model_adjudication=True),
+        )
+    )
+
+    assert "claims_missing" in cleanup_issue_codes
+    assert [node.canonical_name for node in extraction.nodes] == ["Tiny System", "TinyAttention"]
+    assert extraction.claims[0].method_ids == ["m1"]
 
 
 def _tiny_document() -> PaperDocument:
