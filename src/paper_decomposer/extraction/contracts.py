@@ -69,6 +69,7 @@ class ExtractedNode(BaseModel):
     kind: MethodNodeKind
     canonical_name: str
     aliases: list[str] = Field(default_factory=list)
+    category_tags: list[str] = Field(default_factory=list)
     description: str
     status: NodeStatus = "uncertain"
     introduced_by: str | None = None

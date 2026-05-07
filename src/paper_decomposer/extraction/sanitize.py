@@ -120,6 +120,33 @@ _COMPONENT_DEMOTION_SPECS = (
     ("fork / append / free helper methods", ("fork method", "append method", "free method"), "Helper API, not a first-class method node."),
 )
 
+_IMPLEMENTATION_DETAIL_MARKERS = (
+    "kernel",
+    "cuda",
+    "fused",
+    "api",
+    "worker",
+    "frontend",
+    "helper",
+    "broadcast",
+)
+
+_SCENARIO_SETTING_MARKERS = (
+    ("setting:basic_sampling", ("single sequence", "single-sequence", "basic sampling")),
+    ("setting:parallel_sampling", ("parallel sampling", "parallel generation", "parallel-sampling")),
+    ("setting:beam_search", ("beam search", "beam-search", "beam width")),
+    ("setting:shared_prefix_prompting", ("shared prefix", "shared-prefix", "prefix sharing")),
+    ("setting:chatbot_serving", ("chatbot", "chatbot serving")),
+)
+
+_SCENARIO_ADAPTER_MECHANISM_MARKERS = (
+    "kv",
+    "cache",
+    "sharing",
+    "prompt sharing",
+    "block caching",
+)
+
 _METRIC_PATTERNS = (
     ("attention kernel latency", ("attention kernel latency",)),
     ("memory saving", ("memory saving", "memory savings")),
@@ -215,6 +242,7 @@ def preserve_graph_and_attach_claims(
     extraction = _repair_vllm_graph_shape(extraction)
     extraction = _normalize_method_family_ids(extraction)
     extraction = _repair_setting_taxonomy(extraction)
+    extraction = _collapse_non_main_method_nodes(extraction)
     extraction = _demote_component_details(extraction)
     extraction = extraction.model_copy(update={"claims": [_repair_claim(claim, extraction.graph) for claim in extraction.claims]})
     extraction = _normalize_method_family_ids(extraction)
@@ -314,6 +342,7 @@ def _merge_nodes(left: ExtractedNode, right: ExtractedNode) -> ExtractedNode:
     return left.model_copy(
         update={
             "aliases": _dedupe_ids([*left.aliases, right.canonical_name, *right.aliases]),
+            "category_tags": _dedupe_ids([*left.category_tags, *right.category_tags]),
             "evidence_span_ids": _dedupe_ids([*left.evidence_span_ids, *right.evidence_span_ids]),
             "mechanism_sentence": left.mechanism_sentence or right.mechanism_sentence,
             "confidence": left.confidence if left.confidence is not None else right.confidence,
@@ -485,6 +514,329 @@ def _repair_setting_taxonomy(extraction: PaperExtraction) -> PaperExtraction:
     extraction = extraction.model_copy(update={"graph": graph, "demoted_items": _dedupe_demotions(demoted_items)})
     extraction = _remap_setting_references(extraction, setting_replacements)
     return _drop_removed_setting_references(extraction, removed_setting_ids | coarse_scenario_ids)
+
+
+def _collapse_non_main_method_nodes(extraction: PaperExtraction) -> PaperExtraction:
+    graph = extraction.graph
+    node_ids = {node.local_node_id for node in graph.nodes}
+    setting_ids = {setting.local_setting_id for setting in graph.settings}
+    actions: dict[str, tuple[str | None, str, str, list[str]]] = {}
+
+    for node in graph.methods:
+        target_id: str | None = None
+        reason: str | None = None
+        scenario_setting_ids: list[str] = []
+
+        if node.kind == "method_category":
+            reason = "Global/category label; keep outside the paper-local method DAG."
+        else:
+            target_id, scenario_setting_ids = _scenario_adapter_target(node, graph.methods, setting_ids)
+            if target_id is not None:
+                reason = "Scenario-specific adapter collapsed to the reusable mechanism plus applies_to settings."
+            else:
+                reason = _implementation_detail_reason(node, extraction)
+                if reason is not None:
+                    target_id = _valid_demoted_method_target(
+                        _component_storage_target(graph, node.canonical_name),
+                        node_ids,
+                    )
+
+        if reason is None:
+            continue
+        if target_id == node.local_node_id:
+            continue
+        stored_under = target_id or _component_storage_target(graph, node.canonical_name)
+        actions[node.local_node_id] = (target_id, stored_under, reason, scenario_setting_ids)
+
+    if not actions:
+        return extraction
+
+    kept_methods = _apply_demoted_category_tags(
+        [node for node in graph.methods if node.local_node_id not in actions],
+        graph.methods,
+        graph.method_edges,
+        actions,
+    )
+    kept_node_ids = {node.local_node_id for node in [*graph.systems, *kept_methods]}
+    replacements = {node_id: target_id for node_id, (target_id, _stored_under, _reason, _settings) in actions.items()}
+    edges = _retarget_method_edges(graph.method_edges, replacements, kept_node_ids)
+    links = _retarget_method_setting_links(graph.method_setting_links, replacements, kept_node_ids, setting_ids)
+    links.extend(_scenario_applies_to_links(graph.methods, actions, kept_node_ids, setting_ids))
+    graph = graph.model_copy(
+        update={
+            "methods": kept_methods,
+            "method_edges": _dedupe_edges(edges),
+            "method_setting_links": _dedupe_method_setting_links(links),
+        }
+    )
+    demoted_items = [
+        *extraction.demoted_items,
+        *[
+            DemotedItem(
+                name=node.canonical_name,
+                reason_demoted=reason,
+                stored_under=stored_under,
+                evidence_span_ids=node.evidence_span_ids,
+            )
+            for node in extraction.graph.methods
+            if node.local_node_id in actions
+            for _target_id, stored_under, reason, _setting_ids in [actions[node.local_node_id]]
+        ],
+    ]
+    extraction = extraction.model_copy(update={"graph": graph, "demoted_items": _dedupe_demotions(demoted_items)})
+    return _retarget_demoted_method_references(extraction, replacements, kept_node_ids)
+
+
+def _apply_demoted_category_tags(
+    kept_methods: list[ExtractedNode],
+    original_methods: list[ExtractedNode],
+    edges: list[ExtractedEdge],
+    actions: dict[str, tuple[str | None, str, str, list[str]]],
+) -> list[ExtractedNode]:
+    kept_ids = {node.local_node_id for node in kept_methods}
+    method_by_id = {node.local_node_id: node for node in original_methods}
+    tags_by_method_id: dict[str, list[str]] = {}
+
+    for node_id in actions:
+        node = method_by_id[node_id]
+        if node.kind != "method_category":
+            continue
+        tag = _slug(node.canonical_name)
+        neighbor_ids = [
+            edge.child_id
+            for edge in edges
+            if edge.parent_id == node_id and edge.child_id in kept_ids
+        ]
+        neighbor_ids.extend(
+            edge.parent_id
+            for edge in edges
+            if edge.child_id == node_id and edge.parent_id in kept_ids
+        )
+        for neighbor_id in neighbor_ids:
+            tags_by_method_id.setdefault(neighbor_id, []).append(tag)
+
+    if not tags_by_method_id:
+        return kept_methods
+    return [
+        node.model_copy(
+            update={
+                "category_tags": _dedupe_ids(
+                    [*node.category_tags, *tags_by_method_id.get(node.local_node_id, [])]
+                )
+            }
+        )
+        for node in kept_methods
+    ]
+
+
+def _scenario_adapter_target(
+    node: ExtractedNode,
+    methods: list[ExtractedNode],
+    setting_ids: set[str],
+) -> tuple[str | None, list[str]]:
+    normalized = _normalize_identifier(f"{node.local_node_id} {node.canonical_name} {node.description}")
+    scenario_setting_ids = _scenario_setting_ids(normalized, setting_ids)
+    if not scenario_setting_ids:
+        return None, []
+    if not _has_any_marker(normalized, _SCENARIO_ADAPTER_MECHANISM_MARKERS):
+        return None, []
+    target = _general_sharing_method(methods, node.local_node_id)
+    if target is None:
+        return None, []
+    return target.local_node_id, scenario_setting_ids
+
+
+def _scenario_setting_ids(normalized_text: str, setting_ids: set[str]) -> list[str]:
+    matched: list[str] = []
+    for setting_id, markers in _SCENARIO_SETTING_MARKERS:
+        if setting_id not in setting_ids:
+            continue
+        if any(_marker_in_text(marker, normalized_text) for marker in markers):
+            matched.append(setting_id)
+    return matched
+
+
+def _general_sharing_method(methods: list[ExtractedNode], excluded_node_id: str) -> ExtractedNode | None:
+    for node in methods:
+        if node.local_node_id == excluded_node_id:
+            continue
+        normalized = _normalize_identifier(f"{node.local_node_id} {node.canonical_name}")
+        if _mentions_scenario(normalized):
+            continue
+        if "block level" in normalized and "sharing" in normalized:
+            return node
+        if "kv cache sharing" in normalized or "kv block sharing" in normalized:
+            return node
+        if "reference counted" in normalized and "sharing" in normalized:
+            return node
+    return None
+
+
+def _mentions_scenario(normalized_text: str) -> bool:
+    return any(
+        _marker_in_text(marker, normalized_text)
+        for _setting_id, markers in _SCENARIO_SETTING_MARKERS
+        for marker in markers
+    )
+
+
+def _has_any_marker(normalized_text: str, markers: tuple[str, ...]) -> bool:
+    return any(_marker_in_text(marker, normalized_text) for marker in markers)
+
+
+def _implementation_detail_reason(node: ExtractedNode, extraction: PaperExtraction) -> str | None:
+    if node.kind != "method":
+        return None
+    if _is_central_contribution_node(node, extraction):
+        return None
+    normalized = _normalize_identifier(f"{node.local_node_id} {node.canonical_name} {node.description}")
+    spec_reason = _component_detail_reason_for_node(normalized)
+    if spec_reason is not None:
+        return spec_reason
+    if _has_any_marker(normalized, _IMPLEMENTATION_DETAIL_MARKERS):
+        return (
+            "Implementation support such as kernels, CUDA code, fused operations, APIs, workers, "
+            "frontends, helpers, or broadcasts is not part of the main reusable method DAG."
+        )
+    return None
+
+
+def _component_detail_reason_for_node(normalized_text: str) -> str | None:
+    for _name, markers, reason in _COMPONENT_DEMOTION_SPECS:
+        if any(_marker_in_text(marker, normalized_text) for marker in markers):
+            return reason
+    return None
+
+
+def _is_central_contribution_node(node: ExtractedNode, extraction: PaperExtraction) -> bool:
+    normalized_title = _normalize_identifier(extraction.title)
+    normalized_name = _normalize_identifier(node.canonical_name)
+    if normalized_name and normalized_name in normalized_title:
+        return True
+    novelty_markers = ("we propose", "we introduce", "we design", "we develop")
+    evidence_by_id = {span.span_id: span for span in extraction.evidence_spans}
+    for span_id in node.evidence_span_ids:
+        span = evidence_by_id.get(span_id)
+        normalized_text = _normalize_identifier(str(getattr(span, "text", "")))
+        if not _name_appears_in_text(node.canonical_name, normalized_text):
+            continue
+        if any(_normalize_identifier(marker) in normalized_text for marker in novelty_markers):
+            return True
+    return False
+
+
+def _valid_demoted_method_target(target_id: str, node_ids: set[str]) -> str | None:
+    if target_id in node_ids:
+        return target_id
+    return None
+
+
+def _retarget_method_edges(
+    edges: list[ExtractedEdge],
+    replacements: dict[str, str | None],
+    kept_node_ids: set[str],
+) -> list[ExtractedEdge]:
+    retargeted: list[ExtractedEdge] = []
+    for edge in edges:
+        parent_id = replacements.get(edge.parent_id, edge.parent_id)
+        child_id = replacements.get(edge.child_id, edge.child_id)
+        if parent_id is None or child_id is None or parent_id == child_id:
+            continue
+        if parent_id not in kept_node_ids or child_id not in kept_node_ids:
+            continue
+        retargeted.append(edge.model_copy(update={"parent_id": parent_id, "child_id": child_id}))
+
+    for node_id, target_id in replacements.items():
+        if target_id is not None:
+            continue
+        parents = [edge for edge in edges if edge.child_id == node_id and edge.parent_id in kept_node_ids]
+        children = [edge for edge in edges if edge.parent_id == node_id and edge.child_id in kept_node_ids]
+        for parent in parents:
+            for child in children:
+                if parent.parent_id == child.child_id:
+                    continue
+                retargeted.append(
+                    ExtractedEdge(
+                        parent_id=parent.parent_id,
+                        child_id=child.child_id,
+                        relation_kind=child.relation_kind,
+                        evidence_span_ids=_dedupe_ids([*parent.evidence_span_ids, *child.evidence_span_ids]),
+                        confidence=child.confidence if child.confidence is not None else parent.confidence,
+                    )
+                )
+    return retargeted
+
+
+def _retarget_method_setting_links(
+    links: list[ExtractedMethodSettingLink],
+    replacements: dict[str, str | None],
+    kept_node_ids: set[str],
+    setting_ids: set[str],
+) -> list[ExtractedMethodSettingLink]:
+    retargeted: list[ExtractedMethodSettingLink] = []
+    for link in links:
+        method_id = replacements.get(link.method_id, link.method_id)
+        if method_id is None or method_id not in kept_node_ids or link.setting_id not in setting_ids:
+            continue
+        retargeted.append(link.model_copy(update={"method_id": method_id}))
+    return retargeted
+
+
+def _scenario_applies_to_links(
+    methods: list[ExtractedNode],
+    actions: dict[str, tuple[str | None, str, str, list[str]]],
+    kept_node_ids: set[str],
+    setting_ids: set[str],
+) -> list[ExtractedMethodSettingLink]:
+    by_id = {node.local_node_id: node for node in methods}
+    links: list[ExtractedMethodSettingLink] = []
+    for node_id, (target_id, _stored_under, _reason, scenario_setting_ids) in actions.items():
+        if target_id is None or target_id not in kept_node_ids:
+            continue
+        node = by_id[node_id]
+        for setting_id in scenario_setting_ids:
+            if setting_id not in setting_ids:
+                continue
+            links.append(
+                ExtractedMethodSettingLink(
+                    method_id=target_id,
+                    setting_id=setting_id,
+                    relation_kind="applies_to",
+                    evidence_span_ids=node.evidence_span_ids,
+                    confidence=node.confidence,
+                )
+            )
+    return links
+
+
+def _retarget_demoted_method_references(
+    extraction: PaperExtraction,
+    replacements: dict[str, str | None],
+    kept_node_ids: set[str],
+) -> PaperExtraction:
+    claims = [
+        claim.model_copy(update={"method_ids": _retarget_method_ids(claim.method_ids, replacements, kept_node_ids)})
+        for claim in extraction.claims
+    ]
+    outcomes = [
+        outcome.model_copy(update={"method_ids": _retarget_method_ids(outcome.method_ids, replacements, kept_node_ids)})
+        for outcome in extraction.outcomes
+    ]
+    return extraction.model_copy(update={"claims": claims, "outcomes": outcomes})
+
+
+def _retarget_method_ids(
+    method_ids: list[str],
+    replacements: dict[str, str | None],
+    kept_node_ids: set[str],
+) -> list[str]:
+    retargeted: list[str] = []
+    for method_id in method_ids:
+        target_id = replacements.get(method_id, method_id)
+        if target_id is None or target_id not in kept_node_ids or target_id in retargeted:
+            continue
+        retargeted.append(target_id)
+    return retargeted
 
 
 def _demote_component_details(extraction: PaperExtraction) -> PaperExtraction:

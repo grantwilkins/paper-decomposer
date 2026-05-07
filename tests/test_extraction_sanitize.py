@@ -11,6 +11,8 @@ Plausible wrong implementations:
 - Preserve a graph that is structurally valid but semantically too flat for DB writes.
 - Leave end-to-end system claims attached only to supporting methods.
 - Keep numeric claims as prose without outcome rows.
+- Keep scenario-specific adapters, implementation kernels, or category labels as main DAG methods.
+- Demote method bloat but fail to retarget claims/outcomes to the retained reusable mechanism.
 """
 
 from __future__ import annotations
@@ -431,6 +433,199 @@ def test_graph_quality_repair_tightens_vllm_topology_settings_claims_and_outcome
         "outcome:c2:parallel_sampling",
         "outcome:c2:beam_search",
         "outcome:c3",
+    }
+
+    assert validate_extraction(repaired).ok
+
+
+def test_cleanup_collapses_vllm_scenario_kernels_and_categories_out_of_main_dag() -> None:
+    extraction = PaperExtraction(
+        paper_id="paper-1",
+        extraction_run_id="run-1",
+        title="vLLM",
+        evidence_spans=[
+            EvidenceSpan(
+                span_id="abstract",
+                paper_id="paper-1",
+                section_title="Abstract",
+                section_kind="abstract",
+                text="We propose PagedAttention and build vLLM, an LLM serving system.",
+            ),
+            EvidenceSpan(
+                span_id="method",
+                paper_id="paper-1",
+                section_title="PagedAttention",
+                section_kind="method",
+                text=(
+                    "PagedAttention supports block-level KV cache sharing for parallel sampling, "
+                    "beam search, and shared-prefix prompting with reference counts and copy-on-write."
+                ),
+            ),
+            EvidenceSpan(
+                span_id="implementation",
+                paper_id="paper-1",
+                section_title="Implementation",
+                section_kind="method",
+                text="The implementation includes a fused block copy kernel and helper APIs.",
+            ),
+            EvidenceSpan(
+                span_id="eval",
+                paper_id="paper-1",
+                section_title="Evaluation",
+                section_kind="evaluation",
+                text=(
+                    "vLLM achieves 6.1%-9.8% memory saving on parallel sampling and "
+                    "37.6%-55.2% on beam search. PagedAttention incurs 20-26% higher "
+                    "attention kernel latency compared to FasterTransformer."
+                ),
+            ),
+        ],
+        nodes=[
+            ExtractedNode(
+                local_node_id="system:vLLM",
+                kind="system",
+                canonical_name="vLLM",
+                description="LLM serving system.",
+                granularity_rationale="Top-level system.",
+                evidence_span_ids=["abstract"],
+            ),
+            ExtractedNode(
+                local_node_id="cat_kv_cache_management",
+                kind="method_category",
+                canonical_name="KV cache management",
+                description="Global category label.",
+                granularity_rationale="Cheap model promoted a category as a node.",
+                evidence_span_ids=["method"],
+            ),
+            ExtractedNode(
+                local_node_id="method:PagedAttention",
+                kind="method",
+                canonical_name="PagedAttention",
+                description="Paged KV attention.",
+                granularity_rationale="Central primitive.",
+                mechanism_sentence="PagedAttention maps logical KV cache blocks to physical blocks on demand.",
+                evidence_span_ids=["abstract", "method"],
+            ),
+            ExtractedNode(
+                local_node_id="method:block_level_kv_cache_sharing",
+                kind="method",
+                canonical_name="Block-level KV cache sharing",
+                description="KV blocks are shared across related sequences.",
+                granularity_rationale="Reusable sharing mechanism.",
+                mechanism_sentence="Physical KV blocks are shared across logical blocks to reduce duplicate memory.",
+                evidence_span_ids=["method"],
+            ),
+            ExtractedNode(
+                local_node_id="method:parallel_sampling_prompt_kv_sharing",
+                kind="method",
+                canonical_name="parallel-sampling prompt KV sharing",
+                description="Scenario-specific use of KV block sharing.",
+                granularity_rationale="Cheap model over-split a scenario adapter.",
+                mechanism_sentence="Parallel-sampling prompt KV sharing reuses shared prompt KV blocks across sampled outputs.",
+                evidence_span_ids=["method"],
+            ),
+            ExtractedNode(
+                local_node_id="method:beam_search_kv_block_sharing",
+                kind="method",
+                canonical_name="beam-search KV block sharing",
+                description="Scenario-specific use of KV block sharing.",
+                granularity_rationale="Cheap model over-split a scenario adapter.",
+                mechanism_sentence="Beam-search KV block sharing reuses common candidate KV blocks across beams.",
+                evidence_span_ids=["method"],
+            ),
+            ExtractedNode(
+                local_node_id="method:shared_prefix_kv_block_caching",
+                kind="method",
+                canonical_name="shared-prefix KV block caching",
+                description="Scenario-specific use of KV block sharing.",
+                granularity_rationale="Cheap model over-split a scenario adapter.",
+                mechanism_sentence="Shared-prefix KV block caching reuses common prefix KV blocks across requests.",
+                evidence_span_ids=["method"],
+            ),
+            ExtractedNode(
+                local_node_id="method:fused_block_copy_kernel",
+                kind="method",
+                canonical_name="fused block copy kernel",
+                description="Kernel implementation detail.",
+                granularity_rationale="Cheap model promoted implementation support.",
+                mechanism_sentence="The fused block copy kernel copies KV cache blocks in GPU memory for implementation efficiency.",
+                evidence_span_ids=["implementation"],
+            ),
+        ],
+        edges=[
+            ExtractedEdge(parent_id="system:vLLM", child_id="cat_kv_cache_management", relation_kind="uses", evidence_span_ids=["abstract"]),
+            ExtractedEdge(parent_id="cat_kv_cache_management", child_id="method:PagedAttention", relation_kind="uses", evidence_span_ids=["method"]),
+            ExtractedEdge(parent_id="method:PagedAttention", child_id="method:block_level_kv_cache_sharing", relation_kind="uses", evidence_span_ids=["method"]),
+            ExtractedEdge(parent_id="method:block_level_kv_cache_sharing", child_id="method:parallel_sampling_prompt_kv_sharing", relation_kind="uses", evidence_span_ids=["method"]),
+            ExtractedEdge(parent_id="method:block_level_kv_cache_sharing", child_id="method:beam_search_kv_block_sharing", relation_kind="uses", evidence_span_ids=["method"]),
+            ExtractedEdge(parent_id="method:block_level_kv_cache_sharing", child_id="method:shared_prefix_kv_block_caching", relation_kind="uses", evidence_span_ids=["method"]),
+            ExtractedEdge(parent_id="method:PagedAttention", child_id="method:fused_block_copy_kernel", relation_kind="uses", evidence_span_ids=["implementation"]),
+        ],
+        claims=[
+            ExtractedClaim(
+                claim_id="c_memory",
+                paper_id="paper-1",
+                claim_type="memory",
+                raw_text=(
+                    "vLLM achieves 6.1%-9.8% memory saving on parallel sampling and "
+                    "37.6%-55.2% on beam search."
+                ),
+                finding="vLLM saves memory on parallel sampling and beam search.",
+                method_ids=["method:parallel_sampling_prompt_kv_sharing", "method:beam_search_kv_block_sharing"],
+                metric="memory saving",
+                comparator="without sharing",
+                evidence_span_ids=["eval"],
+            ),
+            ExtractedClaim(
+                claim_id="c_kernel",
+                paper_id="paper-1",
+                claim_type="performance",
+                raw_text="PagedAttention incurs 20-26% higher attention kernel latency compared to FasterTransformer.",
+                finding="PagedAttention incurs attention-kernel overhead.",
+                method_ids=["method:fused_block_copy_kernel"],
+                metric="attention kernel latency",
+                delta="20-26%",
+                comparator="FasterTransformer",
+                evidence_span_ids=["eval"],
+            ),
+        ],
+    )
+
+    repaired = preserve_graph_and_attach_claims(extraction)
+
+    method_names = {node.canonical_name for node in repaired.graph.methods}
+    assert "Block-level KV cache sharing" in method_names
+    assert "parallel-sampling prompt KV sharing" not in method_names
+    assert "beam-search KV block sharing" not in method_names
+    assert "shared-prefix KV block caching" not in method_names
+    assert "fused block copy kernel" not in method_names
+    assert "KV cache management" not in method_names
+    tags_by_method = {node.local_node_id: node.category_tags for node in repaired.graph.methods}
+    assert "kv_cache_management" in tags_by_method["meth_pagedattention"]
+
+    link_pairs = {(link.method_id, link.setting_id) for link in repaired.method_setting_links}
+    assert {
+        ("meth_block_level_kv_cache_sharing", "setting:parallel_sampling"),
+        ("meth_block_level_kv_cache_sharing", "setting:beam_search"),
+        ("meth_block_level_kv_cache_sharing", "setting:shared_prefix_prompting"),
+    } <= link_pairs
+
+    claim_by_id = {claim.claim_id: claim for claim in repaired.claims}
+    assert claim_by_id["c_memory"].method_ids == ["meth_block_level_kv_cache_sharing"]
+    assert {"setting:parallel_sampling", "setting:beam_search"} <= set(claim_by_id["c_memory"].setting_ids)
+    assert claim_by_id["c_kernel"].method_ids == ["meth_pagedattention"]
+    assert claim_by_id["c_kernel"].claim_type == "overhead"
+    assert {outcome.outcome_id for outcome in repaired.outcomes} >= {
+        "outcome:c_memory:parallel_sampling",
+        "outcome:c_memory:beam_search",
+        "outcome:c_kernel",
+    }
+    assert {item.name for item in repaired.demoted_items} >= {
+        "parallel-sampling prompt KV sharing",
+        "beam-search KV block sharing",
+        "shared-prefix KV block caching",
+        "fused block copy kernel",
+        "KV cache management",
     }
 
     assert validate_extraction(repaired).ok

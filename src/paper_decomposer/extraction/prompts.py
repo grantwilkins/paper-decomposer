@@ -7,6 +7,8 @@ RULES = (
     "Use only supplied evidence span IDs. Do not invent evidence. "
     "Do not create paper-section nodes. Method nodes need inputs, outputs, and operative move. "
     "Return a sparse method DAG, not a paper outline or evidence-span list. "
+    "Do not emit method_category nodes in normal paper-local extraction; categories belong to later global ontology linking. "
+    "If category labels are useful, attach terse category_tags to retained system/method nodes. "
     "Put scenarios, datasets, hardware, models, and metrics in graph.settings. "
     "Use graph.method_edges only for method/system relationships; use graph.setting_edges for setting relationships; "
     "use graph.method_setting_links for applies_to, evaluated_on, and uses_artifact. "

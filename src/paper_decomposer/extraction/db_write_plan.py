@@ -56,6 +56,7 @@ def build_db_write_plan(extraction: PaperExtraction) -> DBWritePlan:
                 "metadata": {
                     "kind": node.kind,
                     "aliases": node.aliases,
+                    "category_tags": node.category_tags,
                     "status": node.status,
                     "introduced_by": node.introduced_by,
                     "granularity_rationale": node.granularity_rationale,

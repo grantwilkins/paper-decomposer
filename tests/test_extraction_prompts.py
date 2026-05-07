@@ -7,6 +7,7 @@ Plausible wrong implementations:
 - Omit the system-to-primitive graph shape, encouraging flat node bags.
 - Promote decoding scenarios such as beam search as methods in vLLM-like papers.
 - Promote implementation support such as fused kernels or APIs as first-class methods.
+- Emit method_category nodes as part of the paper-local graph.
 - Demote concrete KV-cache mechanisms when only the mechanism sentence is missing.
 - Attach system-level throughput claims to the wrong supporting mechanism.
 - Ask for final candidates instead of promoted graph fields.
@@ -35,6 +36,8 @@ def test_method_graph_prompt_calibrates_vllm_mechanism_granularity() -> None:
     assert "graph-first" in content
     assert "vLLM is the system" in content
     assert "PagedAttention is the central primitive" in content
+    assert "Do not emit method_category nodes" in content
+    assert "category_tags" in content
     assert "block-wise KV cache address translation" in content
     assert "on-demand KV block allocation" in content
     assert "KV block copy-on-write" in content

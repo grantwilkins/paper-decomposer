@@ -54,9 +54,13 @@ def _extraction() -> PaperExtraction:
                 local_node_id="m1",
                 kind="method",
                 canonical_name="PagedAttention",
+                category_tags=["kv_cache_management"],
                 description="KV cache management mechanism.",
                 granularity_rationale="It is a reusable mechanism for KV cache address translation.",
-                mechanism_sentence="Given logical KV blocks, PagedAttention outputs physical block addresses by mapping blocks on demand.",
+                mechanism_sentence=(
+                    "Given logical KV blocks, PagedAttention outputs physical block addresses "
+                    "by mapping blocks on demand."
+                ),
                 evidence_span_ids=["s1"],
             ),
         ],
@@ -115,6 +119,7 @@ def test_write_plan_preserves_local_ids_and_evidence() -> None:
     assert method["paper_id"] == "paper-1"
     assert method["extraction_run_id"] == "run-1"
     assert method["canonical_name"] == "PagedAttention"
+    assert method["metadata"]["category_tags"] == ["kv_cache_management"]
     assert method["metadata"]["evidence_span_ids"] == ["s1"]
 
     setting = plan.settings[0]
