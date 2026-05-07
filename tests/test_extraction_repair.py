@@ -8,6 +8,7 @@ Plausible wrong implementations:
 - Retry the full extraction instead of repairing the invalid final JSON.
 - Keep invalid section-heading nodes after repair.
 - Accept repaired methods that still lack mechanism sentences.
+- Let compression or repair erase a valid earlier graph and leave claims floating.
 """
 
 from __future__ import annotations
@@ -25,9 +26,104 @@ from paper_decomposer.extraction.contracts import (
     ExtractionCaps,
     PaperExtraction,
 )
-from paper_decomposer.extraction.stages import ExtractionDraft
+from paper_decomposer.extraction.stages import ExtractionDraft, MethodGraphDraft
 from paper_decomposer.pipeline import extract_document
 from paper_decomposer.schema import PaperDocument, PaperMetadata, RhetoricalRole, Section
+
+
+def test_extract_document_preserves_graph_draft_when_compression_returns_claims_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = PaperDocument(
+        metadata=PaperMetadata(title="Tiny System"),
+        sections=[
+            Section(
+                title="Method",
+                role=RhetoricalRole.method,
+                body_text="TinyAttention maps logical cache blocks to physical cache blocks on demand.",
+                char_count=75,
+            )
+        ],
+    )
+
+    async def fake_frontmatter(spans, *, config):
+        return SimpleNamespace(candidates=[], model_dump_json=lambda: "{}")
+
+    async def fake_method_graph(spans, sketch, *, config):
+        return MethodGraphDraft(
+            nodes=[
+                ExtractedNode(
+                    local_node_id="system",
+                    kind="system",
+                    canonical_name="Tiny System",
+                    description="Tiny serving system.",
+                    granularity_rationale="The paper presents Tiny System as the composed serving system.",
+                    evidence_span_ids=["paper-id:section:1:span:1"],
+                ),
+                ExtractedNode(
+                    local_node_id="m1",
+                    kind="method",
+                    canonical_name="TinyAttention",
+                    description="Cache-block address translation mechanism.",
+                    granularity_rationale="It defines a reusable block translation mechanism.",
+                    mechanism_sentence=(
+                        "Given logical cache blocks, TinyAttention outputs physical cache blocks by translating "
+                        "block addresses on demand."
+                    ),
+                    evidence_span_ids=["paper-id:section:1:span:1"],
+                ),
+            ],
+            edges=[
+                ExtractedEdge(
+                    parent_id="system",
+                    child_id="m1",
+                    relation_kind="uses",
+                    evidence_span_ids=["paper-id:section:1:span:1"],
+                )
+            ],
+        )
+
+    async def fake_claims(spans, graph, *, config):
+        return SimpleNamespace(model_dump_json=lambda: "{}")
+
+    async def fake_compress(graph, claims, *, config):
+        return ExtractionDraft(
+            claims=[
+                ExtractedClaim(
+                    claim_id="c1",
+                    paper_id="paper-id",
+                    claim_type="capability",
+                    raw_text="TinyAttention maps logical cache blocks to physical cache blocks on demand.",
+                    finding="TinyAttention maps logical cache blocks to physical cache blocks on demand.",
+                    evidence_span_ids=["paper-id:section:1:span:1"],
+                )
+            ]
+        )
+
+    async def fake_repair(extraction: PaperExtraction, validation_errors, *, config):
+        raise AssertionError("preserved graph and deterministic attachment should avoid repair")
+
+    monkeypatch.setattr("paper_decomposer.pipeline.uuid5", lambda namespace, name: "paper-id")
+    monkeypatch.setattr("paper_decomposer.pipeline.uuid4", lambda: "run-id")
+    monkeypatch.setattr("paper_decomposer.pipeline.extract_frontmatter_sketch", fake_frontmatter)
+    monkeypatch.setattr("paper_decomposer.pipeline.extract_method_graph", fake_method_graph)
+    monkeypatch.setattr("paper_decomposer.pipeline.extract_claims_and_outcomes", fake_claims)
+    monkeypatch.setattr("paper_decomposer.pipeline.compress_paper_extraction", fake_compress)
+    monkeypatch.setattr("paper_decomposer.pipeline.repair_paper_extraction", fake_repair)
+    config = SimpleNamespace(
+        pipeline=SimpleNamespace(
+            extraction={
+                "max_model_calls_per_paper": 5,
+                "max_input_chars_per_stage": 50_000,
+                "caps": ExtractionCaps().model_dump(),
+            }
+        )
+    )
+
+    extraction = asyncio.run(extract_document(document, config=config))
+
+    assert [node.canonical_name for node in extraction.nodes] == ["Tiny System", "TinyAttention"]
+    assert extraction.claims[0].method_ids == ["m1"]
 
 
 def test_extract_document_repairs_invalid_method_graph(monkeypatch: pytest.MonkeyPatch) -> None:

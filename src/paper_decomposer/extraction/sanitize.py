@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from .contracts import DemotedItem, ExtractedNode, PaperExtraction
+from .contracts import DemotedItem, ExtractedClaim, ExtractedNode, PaperExtraction, PaperGraph
 
 _GENERIC_SECTION_HEADINGS = {
     "abstract",
@@ -104,6 +104,65 @@ def demote_invalid_method_nodes(extraction: PaperExtraction) -> PaperExtraction:
     )
 
 
+def preserve_graph_and_attach_claims(
+    extraction: PaperExtraction,
+    *,
+    fallback_graph: PaperGraph | None = None,
+) -> PaperExtraction:
+    """Keep the graph-first invariant intact across compression and repair drafts."""
+    graph = _merge_graph(extraction.graph, fallback_graph)
+    extraction = extraction.model_copy(update={"graph": graph})
+    return extraction.model_copy(
+        update={"claims": [_attach_claim(claim, extraction.graph) for claim in extraction.claims]}
+    )
+
+
+def _merge_graph(graph: PaperGraph, fallback_graph: PaperGraph | None) -> PaperGraph:
+    if fallback_graph is None:
+        return graph
+    return graph.model_copy(
+        update={
+            "systems": graph.systems or fallback_graph.systems,
+            "methods": graph.methods or fallback_graph.methods,
+            "method_edges": graph.method_edges or fallback_graph.method_edges,
+            "settings": graph.settings or fallback_graph.settings,
+            "setting_edges": graph.setting_edges or fallback_graph.setting_edges,
+            "method_setting_links": graph.method_setting_links or fallback_graph.method_setting_links,
+        }
+    )
+
+
+def _attach_claim(claim: ExtractedClaim, graph: PaperGraph) -> ExtractedClaim:
+    if claim.method_ids or claim.setting_ids or claim.outcome_ids:
+        return claim
+
+    text = _normalize_identifier(f"{claim.raw_text} {claim.finding}")
+    matching_nodes = [
+        node
+        for node in graph.nodes
+        if _name_appears_in_text(node.canonical_name, text)
+        or any(_name_appears_in_text(alias, text) for alias in node.aliases)
+    ]
+    if matching_nodes:
+        node = max(matching_nodes, key=lambda node: len(_normalize_identifier(node.canonical_name)))
+        return claim.model_copy(update={"method_ids": [node.local_node_id]})
+
+    matching_settings = [
+        setting
+        for setting in graph.settings
+        if _name_appears_in_text(setting.canonical_name, text)
+        or any(_name_appears_in_text(alias, text) for alias in setting.aliases)
+    ]
+    if matching_settings:
+        setting = max(matching_settings, key=lambda setting: len(_normalize_identifier(setting.canonical_name)))
+        return claim.model_copy(update={"setting_ids": [setting.local_setting_id]})
+
+    if len(graph.systems) == 1:
+        return claim.model_copy(update={"method_ids": [graph.systems[0].local_node_id]})
+
+    return claim
+
+
 def _with_grounded_mechanism_sentence(
     node: ExtractedNode,
     evidence_by_id: dict[str, object],
@@ -158,4 +217,15 @@ def _normalize(value: str) -> str:
     return " ".join(value.strip().casefold().split())
 
 
-__all__ = ["demote_invalid_method_nodes"]
+def _name_appears_in_text(name: str, normalized_text: str) -> bool:
+    normalized_name = _normalize_identifier(name)
+    if not normalized_name:
+        return False
+    return f" {normalized_name} " in f" {normalized_text} "
+
+
+def _normalize_identifier(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+__all__ = ["demote_invalid_method_nodes", "preserve_graph_and_attach_claims"]

@@ -7,7 +7,7 @@ from .config import load_config
 from .extraction.assembler import assemble_extraction
 from .extraction.contracts import ExtractionCaps, PaperExtraction
 from .extraction.evidence import select_evidence_spans
-from .extraction.sanitize import demote_invalid_method_nodes
+from .extraction.sanitize import demote_invalid_method_nodes, preserve_graph_and_attach_claims
 from .extraction.stages import (
     compress_paper_extraction,
     extract_claims_and_outcomes,
@@ -57,6 +57,7 @@ async def extract_document(document: PaperDocument, *, config: Any) -> PaperExtr
 
     sketch = await extract_frontmatter_sketch(_frontmatter_spans(spans), config=config)
     graph = await extract_method_graph(_method_spans(spans), sketch, config=config)
+    fallback_graph = getattr(graph, "graph", None)
     claims = await extract_claims_and_outcomes(_evaluation_spans(spans), graph, config=config)
     final = await compress_paper_extraction(graph, claims, config=config)
     extraction = assemble_extraction(
@@ -66,6 +67,7 @@ async def extract_document(document: PaperDocument, *, config: Any) -> PaperExtr
         evidence_spans=spans,
         final=final,
     )
+    extraction = preserve_graph_and_attach_claims(extraction, fallback_graph=fallback_graph)
 
     caps = _extraction_caps(extraction_config)
     report = validate_extraction(
@@ -88,7 +90,9 @@ async def extract_document(document: PaperDocument, *, config: Any) -> PaperExtr
             evidence_spans=spans,
             final=repaired,
         )
+        extraction = preserve_graph_and_attach_claims(extraction, fallback_graph=fallback_graph)
         extraction = demote_invalid_method_nodes(extraction)
+        extraction = preserve_graph_and_attach_claims(extraction)
         report = validate_extraction(
             extraction,
             caps=caps,
