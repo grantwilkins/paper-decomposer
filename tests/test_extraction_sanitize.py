@@ -402,10 +402,10 @@ def test_graph_quality_repair_tightens_vllm_topology_settings_claims_and_outcome
     repaired = preserve_graph_and_attach_claims(extraction)
 
     edge_pairs = {(edge.parent_id, edge.child_id) for edge in repaired.edges}
-    assert ("system:vLLM", "method:PagedAttention") in edge_pairs
-    assert ("method:block_level_sharing", "method:copy_on_write") in edge_pairs
-    assert ("method:sequence_group_preemption", "method:kv_cache_swapping") in edge_pairs
-    assert ("method:sequence_group_preemption", "method:kv_cache_recomputation") in edge_pairs
+    assert ("sys_vllm", "meth_pagedattention") in edge_pairs
+    assert ("meth_block_level_sharing", "meth_copy_on_write") in edge_pairs
+    assert ("meth_sequence_group_preemption", "meth_kv_cache_swapping") in edge_pairs
+    assert ("meth_sequence_group_preemption", "meth_kv_cache_recomputation") in edge_pairs
 
     method_names = {node.canonical_name for node in repaired.graph.methods}
     assert "Block-wise KV cache address translation" in method_names
@@ -421,11 +421,119 @@ def test_graph_quality_repair_tightens_vllm_topology_settings_claims_and_outcome
     }
 
     claim_by_id = {claim.claim_id: claim for claim in repaired.claims}
-    assert claim_by_id["c1"].method_ids == ["system:vLLM"]
+    assert claim_by_id["c1"].method_ids == ["sys_vllm"]
     assert "setting:llm_serving" in claim_by_id["c1"].setting_ids
     assert {"setting:parallel_sampling", "setting:beam_search"} <= set(claim_by_id["c2"].setting_ids)
     assert claim_by_id["c3"].claim_type == "overhead"
     assert all(claim.outcome_ids for claim in repaired.claims)
-    assert {outcome.outcome_id for outcome in repaired.outcomes} == {"outcome:c1", "outcome:c2", "outcome:c3"}
+    assert {outcome.outcome_id for outcome in repaired.outcomes} == {
+        "outcome:c1",
+        "outcome:c2:parallel_sampling",
+        "outcome:c2:beam_search",
+        "outcome:c3",
+    }
 
     assert validate_extraction(repaired).ok
+
+
+def test_cleanup_normalizes_ids_dedupes_settings_and_splits_numeric_outcomes() -> None:
+    extraction = PaperExtraction(
+        paper_id="paper-1",
+        extraction_run_id="run-1",
+        title="vLLM",
+        evidence_spans=[
+            EvidenceSpan(
+                span_id="s1",
+                paper_id="paper-1",
+                section_title="Abstract",
+                section_kind="abstract",
+                text="We propose PagedAttention and build vLLM.",
+            ),
+            EvidenceSpan(
+                span_id="s2",
+                paper_id="paper-1",
+                section_title="Evaluation",
+                section_kind="evaluation",
+                text=(
+                    "For OPT-13B, vLLM can sustain 1.7x-2.7x higher request rates compared to "
+                    "Orca (Oracle) and 2.7x-8x compared to Orca (Max)."
+                ),
+            ),
+        ],
+        nodes=[
+            ExtractedNode(
+                local_node_id="system:vLLM",
+                kind="system",
+                canonical_name="vLLM",
+                description="LLM serving system.",
+                granularity_rationale="Top-level system.",
+                evidence_span_ids=["s1"],
+            ),
+            ExtractedNode(
+                local_node_id="method:PagedAttention",
+                kind="method",
+                canonical_name="PagedAttention",
+                description="Paged KV attention.",
+                granularity_rationale="Central primitive.",
+                mechanism_sentence="PagedAttention maps logical KV cache blocks to physical blocks on demand.",
+                evidence_span_ids=["s1"],
+            ),
+        ],
+        edges=[
+            ExtractedEdge(
+                parent_id="system:vLLM",
+                child_id="method:PagedAttention",
+                relation_kind="uses",
+                evidence_span_ids=["s1"],
+            )
+        ],
+        settings=[
+            ExtractedSetting(
+                local_setting_id="set_model_opt13b",
+                kind="model_artifact",
+                canonical_name="OPT-13B",
+                description="Duplicate cheap-model setting.",
+                evidence_span_ids=["s2"],
+            ),
+            ExtractedSetting(
+                local_setting_id="setting:opt_13b",
+                kind="model_artifact",
+                canonical_name="OPT-13B",
+                description="Canonical deterministic setting.",
+                evidence_span_ids=["s2"],
+            ),
+        ],
+        claims=[
+            ExtractedClaim(
+                claim_id="c1",
+                paper_id="paper-1",
+                claim_type="performance",
+                raw_text=(
+                    "vLLM can sustain 1.7x-2.7x higher request rates compared to Orca (Oracle) "
+                    "and 2.7x-8x compared to Orca (Max)."
+                ),
+                finding="vLLM improves request rates over Orca.",
+                method_ids=["system:vLLM"],
+                setting_ids=["set_model_opt13b", "setting:opt_13b"],
+                evidence_span_ids=["s2"],
+            )
+        ],
+    )
+
+    repaired = preserve_graph_and_attach_claims(extraction)
+
+    assert {node.local_node_id for node in repaired.nodes} == {"sys_vllm", "meth_pagedattention"}
+    assert [setting.local_setting_id for setting in repaired.settings if setting.canonical_name == "OPT-13B"] == [
+        "setting:opt_13b"
+    ]
+    claim = repaired.claims[0]
+    assert claim.method_ids == ["sys_vllm"]
+    assert claim.setting_ids.count("setting:opt_13b") == 1
+    assert claim.metric == "request rate"
+    assert claim.comparator == "Orca (Oracle/Max)"
+    assert set(claim.outcome_ids) == {"outcome:c1:orca_oracle", "outcome:c1:orca_max"}
+    outcome_by_id = {outcome.outcome_id: outcome for outcome in repaired.outcomes}
+    assert outcome_by_id["outcome:c1:orca_oracle"].delta == "1.7×–2.7×"
+    assert outcome_by_id["outcome:c1:orca_oracle"].comparator == "Orca (Oracle)"
+    assert outcome_by_id["outcome:c1:orca_max"].delta == "2.7×–8×"
+    assert outcome_by_id["outcome:c1:orca_max"].comparator == "Orca (Max)"

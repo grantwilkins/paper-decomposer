@@ -13,8 +13,8 @@ The implementation of the paper-decomposer pipeline. PDF in -> parsed `PaperDocu
 | [`schema.py`](schema.py) | Pydantic models: `ApiConfig`, `ModelTierConfig`, `ModelsConfig`, `PdfPipelineConfig`, `PipelineConfig`, `DatabaseConfig`, `PaperDecomposerConfig`, `AppSettings`, `RhetoricalRole`, `EvidenceArtifact`, `Section`, `PaperMetadata`, `PaperDocument`. |
 | [`models.py`](models.py) | The Together API client. `call_model(tier, messages, response_schema, config)` is the single entry point for LLM calls. Handles structured-output schema injection, JSON extraction, repair-suffix retry, exponential backoff, per-tier cost accounting. Also exports `preflight_model_tiers`, `reset_cost_tracker`, `get_cost_tracker`. |
 | [`pdf_parser.py`](pdf_parser.py) | `parse_pdf(pdf_path, config) -> PaperDocument`. Uses PyMuPDF to extract text blocks with font metadata, detect two-column layout, segment sections by numbered/unnumbered headers, classify rhetorical role from header keywords, strip references, and extract figure/table/algorithm/theorem/lemma/definition captions into `EvidenceArtifact`s. |
-| [`pipeline.py`](pipeline.py) | `ingest_paper(pdf_path, config_path)` parses only. `extract_paper(pdf_path, config_path)` parses, selects evidence spans, runs staged extraction, and validates paper-local JSON. |
-| [`extraction/`](extraction/) | Paper-local extraction contracts, evidence selection, prompts, staged LLM calls, validators, assembler, and DB write-plan mapping. |
+| [`pipeline.py`](pipeline.py) | `ingest_paper(pdf_path, config_path)` parses only. `extract_paper(pdf_path, config_path)` parses, selects evidence spans, runs staged extraction, applies deterministic cleanup, and validates paper-local JSON. |
+| [`extraction/`](extraction/) | Paper-local extraction contracts, evidence selection, prompts, staged LLM calls, deterministic sanitization, validators, assembler, and DB write-plan mapping. |
 | [`db/schema.sql`](db/schema.sql) | Postgres DDL: papers, extraction runs, evidence spans/links, methods (DAG), settings (DAG), method-setting links, outcomes, claims. Requires `pgcrypto`, `pg_trgm`, `vector`. |
 | [`db/client.py`](db/client.py) | `PaperDecomposerDB` — async psycopg connection pool. `apply_schema()` is implemented; row-level transaction helpers are intentionally absent until the live DB writer lands. |
 
@@ -33,7 +33,7 @@ The implementation of the paper-decomposer pipeline. PDF in -> parsed `PaperDocu
  PaperExtraction(graph.systems, graph.methods, graph.settings, outcomes, claims)
 ```
 
-The live DB transaction layer is still separate. The current extraction code produces validated JSON and a schema-aware write plan that preserves paper-local IDs and evidence. Claims-only output is a draft and fails validation until graph nodes and attachments exist.
+The live DB transaction layer is still separate. The current extraction code produces validated JSON and a schema-aware write plan that preserves paper-local IDs and evidence. Claims-only output is a draft and fails validation until graph nodes and attachments exist. Normal compression and repair use configured cheap/reliable tiers; large-model adjudication is disabled until targeted validator-triggered patch packets exist.
 
 ## Cost tracking
 

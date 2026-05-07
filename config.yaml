@@ -56,7 +56,14 @@ pipeline:
     max_model_calls_per_paper: 5
     max_input_chars_per_stage: 50000
     default_model_tier: medium
-    adjudication_model_tier: medium
+    repair_model_tier: medium
+    adjudication_model_tier: heavy
+    enable_large_model_adjudication: false
+    large_model_only_for:
+      - repeated_validation_failure
+      - ambiguous_claim_attachment
+      - graph_topology_conflict
+      - high_value_fixture
     enable_visual_figure_extraction: false
     include_captions: true
     include_table_text: true

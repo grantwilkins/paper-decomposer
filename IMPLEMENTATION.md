@@ -303,14 +303,26 @@ Output:
 - Demoted items preserved.
 - Graph compressed away from paper-outline structure.
 
-Model tier: medium by default.
+Model tier: same as the default extraction tier. This is still part of the cheap draft path, not a large-model cleanup pass.
 
 ## Repair and Adjudication
 
 Run only when deterministic validation fails.
 
-- Retry malformed JSON or simple schema failure once on the configured default tier.
-- Use a heavier model only for repeated validation failure, oversized graphs, paper-outline-shaped graphs, ambiguous claim attachment, or high-value papers.
+- Deterministic normalization runs before any repair call: normalize local IDs, collapse duplicate settings, prune invalid references, attach obvious system claims, and create outcome rows from structured numeric claims.
+- The optional repair call uses `repair_model_tier`, normally the same cheap/reliable tier as drafting.
+- A heavier adjudication model is disabled by default and should only receive small validator-triggered packets for unresolved ambiguity, not the whole paper JSON.
+- Large-model adjudication is reserved for repeated validation failure, ambiguous claim attachment, graph topology conflicts, or high-value fixtures.
+
+The core policy is:
+
+```text
+Cheap model proposes.
+Code normalizes.
+Validators reject.
+Cheap model repairs once.
+Large model adjudicates only the unresolved diff.
+```
 
 # Prompting Strategy
 
@@ -438,8 +450,9 @@ Cost efficiency is a first-class requirement.
 - Limit maximum characters or tokens per stage.
 - Cap model calls per paper.
 - Use the smallest reliable Together-hosted model by default.
-- Retry malformed JSON once with the configured default tier.
-- Escalate only on validation failure, ambiguous attachment, oversized graph shape, or high-value papers.
+- Retry malformed JSON once with the configured stage tier.
+- Run deterministic repair before model repair.
+- Keep large-model adjudication disabled unless a small targeted failure packet is required.
 - Track cost using the existing cost tracker in `models.py`.
 - Expose cost summary in the CLI.
 - Make model tiers configurable in `config.yaml`.
@@ -452,7 +465,14 @@ extraction:
   max_model_calls_per_paper: 5
   max_input_chars_per_stage: 50000
   default_model_tier: medium
-  adjudication_model_tier: medium
+  repair_model_tier: medium
+  adjudication_model_tier: heavy
+  enable_large_model_adjudication: false
+  large_model_only_for:
+    - repeated_validation_failure
+    - ambiguous_claim_attachment
+    - graph_topology_conflict
+    - high_value_fixture
   enable_visual_figure_extraction: false
   include_captions: true
   include_table_text: true

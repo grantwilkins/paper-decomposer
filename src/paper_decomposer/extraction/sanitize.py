@@ -10,6 +10,7 @@ from .contracts import (
     ExtractedNode,
     ExtractedOutcome,
     ExtractedSetting,
+    ExtractedSettingEdge,
     PaperExtraction,
     PaperGraph,
 )
@@ -46,6 +47,7 @@ _PROBLEM_SETTING_TERMS = (
     "limitation",
     "bottleneck",
     "fragmentation issue",
+    "memory management",
 )
 
 _NAMED_SETTINGS = (
@@ -116,6 +118,15 @@ _COMPONENT_DEMOTION_SPECS = (
     ("FastAPI frontend", ("fastapi",), "Serving frontend implementation detail."),
     ("OpenAI-compatible API", ("openai api",), "Serving API compatibility detail."),
     ("fork / append / free helper methods", ("fork method", "append method", "free method"), "Helper API, not a first-class method node."),
+)
+
+_METRIC_PATTERNS = (
+    ("attention kernel latency", ("attention kernel latency",)),
+    ("memory saving", ("memory saving", "memory savings")),
+    ("request rate", ("request rate", "request rates")),
+    ("throughput", ("throughput",)),
+    ("concurrent requests", ("concurrent requests", "requests at the same time", "more requests")),
+    ("latency", ("latency", "latencies")),
 )
 
 
@@ -202,9 +213,11 @@ def preserve_graph_and_attach_claims(
     graph = _merge_graph(extraction.graph, fallback_graph)
     extraction = extraction.model_copy(update={"graph": graph})
     extraction = _repair_vllm_graph_shape(extraction)
+    extraction = _normalize_method_family_ids(extraction)
     extraction = _repair_setting_taxonomy(extraction)
     extraction = _demote_component_details(extraction)
     extraction = extraction.model_copy(update={"claims": [_repair_claim(claim, extraction.graph) for claim in extraction.claims]})
+    extraction = _normalize_method_family_ids(extraction)
     return _materialize_claim_outcomes(extraction)
 
 
@@ -223,11 +236,97 @@ def _merge_graph(graph: PaperGraph, fallback_graph: PaperGraph | None) -> PaperG
     )
 
 
+def _normalize_method_family_ids(extraction: PaperExtraction) -> PaperExtraction:
+    replacements: dict[str, str] = {}
+    systems = _normalize_nodes(extraction.graph.systems, replacements)
+    methods = _normalize_nodes(extraction.graph.methods, replacements)
+    if not replacements:
+        return extraction
+
+    graph = extraction.graph.model_copy(
+        update={
+            "systems": systems,
+            "methods": methods,
+            "method_edges": [
+                edge.model_copy(
+                    update={
+                        "parent_id": replacements.get(edge.parent_id, edge.parent_id),
+                        "child_id": replacements.get(edge.child_id, edge.child_id),
+                    }
+                )
+                for edge in extraction.edges
+            ],
+            "method_setting_links": [
+                link.model_copy(update={"method_id": replacements.get(link.method_id, link.method_id)})
+                for link in extraction.method_setting_links
+            ],
+        }
+    )
+    outcomes = [
+        outcome.model_copy(
+            update={"method_ids": _dedupe_ids([replacements.get(method_id, method_id) for method_id in outcome.method_ids])}
+        )
+        for outcome in extraction.outcomes
+    ]
+    claims = [
+        claim.model_copy(
+            update={"method_ids": _dedupe_ids([replacements.get(method_id, method_id) for method_id in claim.method_ids])}
+        )
+        for claim in extraction.claims
+    ]
+    demoted_items = [
+        item.model_copy(update={"stored_under": replacements.get(item.stored_under, item.stored_under)})
+        for item in extraction.demoted_items
+    ]
+    return extraction.model_copy(
+        update={
+            "graph": graph,
+            "outcomes": outcomes,
+            "claims": claims,
+            "demoted_items": demoted_items,
+        }
+    )
+
+
+def _normalize_nodes(nodes: list[ExtractedNode], replacements: dict[str, str]) -> list[ExtractedNode]:
+    by_id: dict[str, ExtractedNode] = {}
+    for node in nodes:
+        normalized_id = _normalized_node_id(node)
+        if normalized_id != node.local_node_id:
+            replacements[node.local_node_id] = normalized_id
+        normalized = node.model_copy(update={"local_node_id": normalized_id})
+        if normalized_id in by_id:
+            by_id[normalized_id] = _merge_nodes(by_id[normalized_id], normalized)
+        else:
+            by_id[normalized_id] = normalized
+    return list(by_id.values())
+
+
+def _normalized_node_id(node: ExtractedNode) -> str:
+    if node.local_node_id.startswith("method:"):
+        return f"meth_{_slug(node.local_node_id.removeprefix('method:'))}"
+    if node.local_node_id.startswith("system:"):
+        return f"sys_{_slug(node.local_node_id.removeprefix('system:'))}"
+    return node.local_node_id
+
+
+def _merge_nodes(left: ExtractedNode, right: ExtractedNode) -> ExtractedNode:
+    return left.model_copy(
+        update={
+            "aliases": _dedupe_ids([*left.aliases, right.canonical_name, *right.aliases]),
+            "evidence_span_ids": _dedupe_ids([*left.evidence_span_ids, *right.evidence_span_ids]),
+            "mechanism_sentence": left.mechanism_sentence or right.mechanism_sentence,
+            "confidence": left.confidence if left.confidence is not None else right.confidence,
+        }
+    )
+
+
 def _repair_claim(claim: ExtractedClaim, graph: PaperGraph) -> ExtractedClaim:
     claim = _retarget_overall_system_claim(claim, graph)
     claim = _retarget_claim_settings(claim, graph)
     if _is_overhead_claim(claim):
         claim = claim.model_copy(update={"claim_type": "overhead"})
+    claim = _populate_claim_structured_fields(claim)
     return _attach_claim(claim, graph)
 
 
@@ -317,7 +416,7 @@ def _repair_setting_taxonomy(extraction: PaperExtraction) -> PaperExtraction:
     evidence_text = _normalize_identifier(" ".join(text_by_span.values()))
     graph = extraction.graph
     demoted_items = list(extraction.demoted_items)
-    settings_by_id = {setting.local_setting_id: setting for setting in graph.settings}
+    settings_by_id, setting_replacements = _canonicalize_settings(graph.settings)
 
     for spec in _NAMED_SETTINGS:
         setting_id, name, kind, markers, description = spec
@@ -365,14 +464,14 @@ def _repair_setting_taxonomy(extraction: PaperExtraction) -> PaperExtraction:
 
     replacement_ids = _present_named_setting_ids(kept_settings)
     method_setting_links = _repair_method_setting_links(
-        graph.method_setting_links,
+        _remap_method_setting_links(graph.method_setting_links, setting_replacements),
         removed_setting_ids=removed_setting_ids,
         coarse_scenario_ids=coarse_scenario_ids,
         replacement_ids=replacement_ids,
     )
     setting_edges = [
         edge
-        for edge in graph.setting_edges
+        for edge in _remap_setting_edges(graph.setting_edges, setting_replacements)
         if edge.parent_id not in removed_setting_ids | coarse_scenario_ids
         and edge.child_id not in removed_setting_ids | coarse_scenario_ids
     ]
@@ -384,6 +483,7 @@ def _repair_setting_taxonomy(extraction: PaperExtraction) -> PaperExtraction:
         }
     )
     extraction = extraction.model_copy(update={"graph": graph, "demoted_items": _dedupe_demotions(demoted_items)})
+    extraction = _remap_setting_references(extraction, setting_replacements)
     return _drop_removed_setting_references(extraction, removed_setting_ids | coarse_scenario_ids)
 
 
@@ -451,29 +551,193 @@ def _materialize_claim_outcomes(extraction: PaperExtraction) -> PaperExtraction:
     outcomes_by_id = {outcome.outcome_id: outcome for outcome in extraction.outcomes}
     claims: list[ExtractedClaim] = []
     for claim in extraction.claims:
-        if not _claim_requires_outcome(claim):
+        outcome_specs = _claim_outcome_specs(claim)
+        if not outcome_specs:
             claims.append(claim)
             continue
-        outcome_id = f"outcome:{claim.claim_id}"
-        if outcome_id not in outcomes_by_id:
-            outcomes_by_id[outcome_id] = ExtractedOutcome(
-                outcome_id=outcome_id,
-                paper_id=extraction.paper_id,
-                metric=claim.metric or "unspecified metric",
-                method_ids=claim.method_ids,
-                setting_ids=claim.setting_ids,
-                value=claim.value,
-                delta=claim.delta,
-                baseline=claim.baseline,
-                comparator=claim.comparator,
-                evidence_span_ids=claim.evidence_span_ids,
-                confidence=claim.confidence,
-            )
         outcome_ids = list(claim.outcome_ids)
-        if outcome_id not in outcome_ids:
-            outcome_ids.append(outcome_id)
+        for spec in outcome_specs:
+            outcome_id = str(spec["outcome_id"])
+            if outcome_id not in outcomes_by_id:
+                outcomes_by_id[outcome_id] = ExtractedOutcome(
+                    outcome_id=outcome_id,
+                    paper_id=extraction.paper_id,
+                    metric=str(spec["metric"]),
+                    method_ids=claim.method_ids,
+                    setting_ids=claim.setting_ids,
+                    value=spec.get("value"),
+                    delta=spec.get("delta"),
+                    baseline=spec.get("baseline"),
+                    comparator=spec.get("comparator"),
+                    evidence_span_ids=claim.evidence_span_ids,
+                    confidence=claim.confidence,
+                )
+            if outcome_id not in outcome_ids:
+                outcome_ids.append(outcome_id)
         claims.append(claim.model_copy(update={"outcome_ids": outcome_ids}))
     return extraction.model_copy(update={"claims": claims, "outcomes": list(outcomes_by_id.values())})
+
+
+def _claim_outcome_specs(claim: ExtractedClaim) -> list[dict[str, str | None]]:
+    text = _claim_text(claim)
+    metric = claim.metric or _infer_metric(text)
+    if metric is None:
+        return []
+
+    specs = _split_known_outcomes(claim, text, metric)
+    if specs:
+        return specs
+
+    delta = claim.delta or claim.value or _first_magnitude(text)
+    comparator = claim.comparator or claim.baseline or _infer_comparator(text, metric)
+    if not delta or not comparator:
+        return []
+    return [
+        {
+            "outcome_id": f"outcome:{claim.claim_id}",
+            "metric": metric,
+            "delta": delta if claim.value is None else claim.delta,
+            "value": claim.value,
+            "baseline": claim.baseline,
+            "comparator": comparator if claim.baseline is None else claim.comparator,
+        }
+    ]
+
+
+def _split_known_outcomes(claim: ExtractedClaim, text: str, metric: str) -> list[dict[str, str | None]]:
+    specs: list[dict[str, str | None]] = []
+    oracle_delta = _delta_before(text, "orca (oracle)")
+    max_delta = _delta_before(text, "orca (max)")
+    if oracle_delta and max_delta:
+        return [
+            _outcome_spec(claim, "orca_oracle", metric, oracle_delta, "Orca (Oracle)"),
+            _outcome_spec(claim, "orca_max", metric, max_delta, "Orca (Max)"),
+        ]
+
+    one_shot_delta = _delta_before(text, "one")
+    five_shot_delta = _delta_before(text, "five")
+    if "shared" in _normalize_identifier(text) and one_shot_delta and five_shot_delta:
+        return [
+            _outcome_spec(claim, "one_shot", metric, one_shot_delta, "Orca (Oracle)"),
+            _outcome_spec(claim, "five_shot", metric, five_shot_delta, "Orca (Oracle)"),
+        ]
+
+    if metric == "memory saving":
+        parallel_delta = _delta_before(text, "parallel sampling")
+        beam_delta = _delta_before(text, "beam search")
+        if parallel_delta:
+            specs.append(_outcome_spec(claim, "parallel_sampling", metric, parallel_delta, "without sharing"))
+        if beam_delta:
+            specs.append(_outcome_spec(claim, "beam_search", metric, beam_delta, "without sharing"))
+    return specs
+
+
+def _outcome_spec(
+    claim: ExtractedClaim,
+    suffix: str,
+    metric: str,
+    delta: str,
+    comparator: str,
+) -> dict[str, str | None]:
+    return {
+        "outcome_id": f"outcome:{claim.claim_id}:{suffix}",
+        "metric": metric,
+        "delta": delta,
+        "value": None,
+        "baseline": claim.baseline,
+        "comparator": comparator,
+    }
+
+
+def _populate_claim_structured_fields(claim: ExtractedClaim) -> ExtractedClaim:
+    text = _claim_text(claim)
+    updates: dict[str, str] = {}
+    if claim.metric is None:
+        metric = _infer_metric(text)
+        if metric is not None:
+            updates["metric"] = metric
+    if claim.delta is None and claim.value is None:
+        delta = _first_magnitude(text)
+        if delta is not None:
+            updates["delta"] = delta
+    if claim.comparator is None and claim.baseline is None:
+        comparator = _infer_comparator(text, updates.get("metric") or claim.metric)
+        if comparator is not None:
+            updates["comparator"] = comparator
+    if not updates:
+        return claim
+    return claim.model_copy(update=updates)
+
+
+def _claim_text(claim: ExtractedClaim) -> str:
+    return f"{claim.raw_text} {claim.finding}"
+
+
+def _infer_metric(text: str) -> str | None:
+    normalized = _normalize_identifier(text)
+    for metric, markers in _METRIC_PATTERNS:
+        if any(marker in normalized for marker in markers):
+            return metric
+    return None
+
+
+def _infer_comparator(text: str, metric: str | None) -> str | None:
+    normalized = _normalize_identifier(text)
+    if "orca oracle" in normalized and "orca max" in normalized:
+        return "Orca (Oracle/Max)"
+    if "orca oracle" in normalized:
+        return "Orca (Oracle)"
+    if "orca max" in normalized:
+        return "Orca (Max)"
+    if "orca baselines" in normalized:
+        return "Orca baselines"
+    if "orca" in normalized:
+        return "Orca"
+    if "fastertransformer" in normalized:
+        return "FasterTransformer"
+    if metric == "memory saving":
+        return "without sharing"
+    return None
+
+
+def _first_magnitude(text: str) -> str | None:
+    match = re.search(_magnitude_pattern(), text, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    return _clean_delta(match.group(0))
+
+
+def _delta_before(text: str, marker: str) -> str | None:
+    normalized_marker = re.escape(marker).replace(r"\ ", r"\s+")
+    marker_match = re.search(normalized_marker, text, flags=re.IGNORECASE)
+    if marker_match is None:
+        return None
+    prefix = text[: marker_match.start()]
+    matches = list(re.finditer(_magnitude_pattern(), prefix, flags=re.IGNORECASE))
+    if not matches:
+        return None
+    return _clean_delta(matches[-1].group(0))
+
+
+def _magnitude_pattern() -> str:
+    range_dash = r"[\-–—‑]"
+    number = r"\d+(?:\s*\.\s*\d+)?"
+    unit = r"(?:×|x|%)"
+    return rf"{number}\s*{unit}(?:\s*{range_dash}\s*{number}\s*{unit})?"
+
+
+def _clean_delta(value: str) -> str:
+    cleaned = re.sub(r"\s+", "", value)
+    cleaned = cleaned.replace("x", "×")
+    cleaned = cleaned.replace("-", "–").replace("—", "–").replace("‑", "–")
+    return cleaned
+
+
+def _claim_requires_outcome(claim: ExtractedClaim) -> bool:
+    has_metric = bool(claim.metric)
+    has_value = bool(claim.value or claim.delta)
+    has_comparator = bool(claim.baseline or claim.comparator)
+    return has_metric and has_value and has_comparator
 
 
 def _tighten_blockwise_node(node: ExtractedNode) -> ExtractedNode:
@@ -523,7 +787,7 @@ def _sequence_group_preemption_node(
     if not span_ids:
         span_ids = [span_id for node in (swapping, recomputation) if node is not None for span_id in node.evidence_span_ids]
     return ExtractedNode(
-        local_node_id="method:sequence_group_preemption",
+        local_node_id="meth_sequence_group_preemption",
         kind="method",
         canonical_name="Sequence-group preemption",
         description="Scheduling policy that preempts whole sequence groups and recovers their KV cache later.",
@@ -630,6 +894,109 @@ def _dedupe_edges(edges: list[ExtractedEdge]) -> list[ExtractedEdge]:
         seen.add(key)
         deduped.append(edge)
     return deduped
+
+
+def _canonicalize_settings(settings: list[ExtractedSetting]) -> tuple[dict[str, ExtractedSetting], dict[str, str]]:
+    settings_by_id: dict[str, ExtractedSetting] = {}
+    replacements: dict[str, str] = {}
+    for setting in settings:
+        canonical = _named_setting_spec_for(setting)
+        if canonical is None:
+            target_id = setting.local_setting_id
+            canonical_setting = setting
+        else:
+            target_id, name, kind, _markers, description = canonical
+            if setting.local_setting_id != target_id:
+                replacements[setting.local_setting_id] = target_id
+            aliases = list(setting.aliases)
+            if _normalize_identifier(setting.canonical_name) != _normalize_identifier(name):
+                aliases.append(setting.canonical_name)
+            canonical_setting = setting.model_copy(
+                update={
+                    "local_setting_id": target_id,
+                    "kind": kind,
+                    "canonical_name": name,
+                    "description": setting.description or description,
+                    "aliases": _dedupe_ids(aliases),
+                }
+            )
+        if target_id in settings_by_id:
+            settings_by_id[target_id] = _merge_settings(settings_by_id[target_id], canonical_setting)
+        else:
+            settings_by_id[target_id] = canonical_setting
+    return settings_by_id, replacements
+
+
+def _named_setting_spec_for(setting: ExtractedSetting) -> tuple[str, str, str, tuple[str, ...], str] | None:
+    normalized_name = _normalize_identifier(setting.canonical_name)
+    normalized_text = _normalize_identifier(" ".join([setting.canonical_name, *setting.aliases, setting.local_setting_id]))
+    for spec in _NAMED_SETTINGS:
+        setting_id, name, _kind, markers, _description = spec
+        if setting.local_setting_id == setting_id:
+            return spec
+        if normalized_name == _normalize_identifier(name):
+            return spec
+        if any(_normalize_identifier(marker) in normalized_text for marker in markers):
+            return spec
+    return None
+
+
+def _merge_settings(left: ExtractedSetting, right: ExtractedSetting) -> ExtractedSetting:
+    aliases = [*left.aliases, right.canonical_name, *right.aliases]
+    return left.model_copy(
+        update={
+            "aliases": _dedupe_ids(aliases),
+            "evidence_span_ids": _dedupe_ids([*left.evidence_span_ids, *right.evidence_span_ids]),
+            "confidence": left.confidence if left.confidence is not None else right.confidence,
+        }
+    )
+
+
+def _remap_method_setting_links(
+    links: list[ExtractedMethodSettingLink],
+    replacements: dict[str, str],
+) -> list[ExtractedMethodSettingLink]:
+    if not replacements:
+        return links
+    return [
+        link.model_copy(update={"setting_id": replacements.get(link.setting_id, link.setting_id)})
+        for link in links
+    ]
+
+
+def _remap_setting_edges(
+    edges: list[ExtractedSettingEdge],
+    replacements: dict[str, str],
+) -> list[ExtractedSettingEdge]:
+    if not replacements:
+        return edges
+    return [
+        edge.model_copy(
+            update={
+                "parent_id": replacements.get(edge.parent_id, edge.parent_id),
+                "child_id": replacements.get(edge.child_id, edge.child_id),
+            }
+        )
+        for edge in edges
+    ]
+
+
+def _remap_setting_references(extraction: PaperExtraction, replacements: dict[str, str]) -> PaperExtraction:
+    if not replacements:
+        return extraction
+    claims = [
+        claim.model_copy(
+            update={"setting_ids": _dedupe_ids([replacements.get(setting_id, setting_id) for setting_id in claim.setting_ids])}
+        )
+        for claim in extraction.claims
+    ]
+    outcomes = [
+        outcome.model_copy(
+            update={"setting_ids": _dedupe_ids([replacements.get(setting_id, setting_id) for setting_id in outcome.setting_ids])}
+        )
+        for outcome in extraction.outcomes
+    ]
+    return extraction.model_copy(update={"claims": claims, "outcomes": outcomes})
 
 
 def _is_problem_setting_name(normalized_name: str) -> bool:
@@ -760,13 +1127,6 @@ def _is_overhead_claim(claim: ExtractedClaim) -> bool:
     )
 
 
-def _claim_requires_outcome(claim: ExtractedClaim) -> bool:
-    has_metric = bool(claim.metric)
-    has_value = bool(claim.value or claim.delta)
-    has_comparator = bool(claim.baseline or claim.comparator)
-    return has_metric and has_value and has_comparator
-
-
 def _claim_mentions_single_system(claim: ExtractedClaim, graph: PaperGraph) -> bool:
     system = _first_system(graph)
     if system is None:
@@ -838,6 +1198,21 @@ def _name_appears_in_text(name: str, normalized_text: str) -> bool:
 
 def _normalize_identifier(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def _slug(value: str) -> str:
+    return "_".join(_normalize_identifier(value).split())
+
+
+def _dedupe_ids(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
 
 
 __all__ = ["demote_invalid_method_nodes", "preserve_graph_and_attach_claims"]

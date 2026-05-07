@@ -152,9 +152,8 @@ async def compress_paper_extraction(
     *,
     config: Any,
 ) -> ExtractionDraft:
-    tier = _adjudication_model_tier(config)
     return await call_model(
-        tier,
+        _default_model_tier(config),
         compression_prompt(graph.model_dump_json(exclude={"candidates", "demoted_items"}), claims.model_dump_json()),
         response_schema=ExtractionDraft,
         config=config,
@@ -168,7 +167,7 @@ async def repair_paper_extraction(
     config: Any,
 ) -> ExtractionDraft:
     return await call_model(
-        _adjudication_model_tier(config),
+        _repair_model_tier(config),
         repair_prompt(extraction.model_dump_json(), validation_errors, extraction.evidence_spans),
         response_schema=ExtractionDraft,
         config=config,
@@ -177,6 +176,10 @@ async def repair_paper_extraction(
 
 def _default_model_tier(config: Any) -> ModelTier:
     return _model_tier_from_config(config, key="default_model_tier", default="small")
+
+
+def _repair_model_tier(config: Any) -> ModelTier:
+    return _model_tier_from_config(config, key="repair_model_tier", default=_default_model_tier(config))
 
 
 def _adjudication_model_tier(config: Any) -> ModelTier:

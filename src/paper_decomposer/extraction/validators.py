@@ -697,7 +697,15 @@ def _is_problem_setting(name: str, kind: str) -> bool:
     if kind not in {"application", "task", "workload"}:
         return False
     normalized = _normalize_identifier(name)
-    problem_terms = ("inefficiency", "challenge", "problem", "limitation", "bottleneck", "fragmentation issue")
+    problem_terms = (
+        "inefficiency",
+        "challenge",
+        "problem",
+        "limitation",
+        "bottleneck",
+        "fragmentation issue",
+        "memory management",
+    )
     return any(term in normalized for term in problem_terms)
 
 

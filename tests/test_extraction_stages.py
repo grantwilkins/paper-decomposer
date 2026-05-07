@@ -1,13 +1,14 @@
 """
 Claim:
-LLM extraction stages use the configured cheap model tier without leaking the
-nonexistent `cheap` tier into the Together client, and prompts stay focused on
-the selected evidence spans.
+LLM extraction stages use cheap/default tiers for normal draft work, reserve
+repair_model_tier for the optional repair call, and never leak the nonexistent
+`cheap` tier into the Together client.
 
 Plausible wrong implementations:
 - Pass `cheap` directly to `call_model` even though runtime tiers are small,
   medium, and heavy.
 - Ignore extraction config and always call a stronger model.
+- Route normal compression or cheap repair through the large adjudication tier.
 - Build stage prompts without evidence span IDs, making grounding impossible.
 """
 
@@ -19,8 +20,16 @@ from typing import Any
 
 import pytest
 
-from paper_decomposer.extraction.contracts import EvidenceSpan
-from paper_decomposer.extraction.stages import FrontmatterSketch, extract_frontmatter_sketch
+from paper_decomposer.extraction.contracts import EvidenceSpan, ExtractionValidationError, PaperExtraction, ValidationSeverity
+from paper_decomposer.extraction.stages import (
+    ClaimsOutcomesDraft,
+    ExtractionDraft,
+    FrontmatterSketch,
+    MethodGraphDraft,
+    compress_paper_extraction,
+    extract_frontmatter_sketch,
+    repair_paper_extraction,
+)
 
 
 def test_frontmatter_stage_maps_cheap_to_small_and_includes_span_ids(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,3 +58,61 @@ def test_frontmatter_stage_maps_cheap_to_small_and_includes_span_ids(monkeypatch
     assert calls[0]["tier"] == "small"
     assert "[s1]" in calls[0]["messages"][1]["content"]
     assert calls[0]["response_schema"] is FrontmatterSketch
+
+
+def test_compression_uses_default_tier_not_large_adjudication(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_call_model(tier: str, messages: list[dict[str, str]], response_schema: type, config: Any) -> Any:
+        calls.append({"tier": tier, "messages": messages, "response_schema": response_schema})
+        return ExtractionDraft()
+
+    monkeypatch.setattr("paper_decomposer.extraction.stages.call_model", fake_call_model)
+    config = SimpleNamespace(
+        pipeline=SimpleNamespace(
+            extraction={
+                "default_model_tier": "medium",
+                "repair_model_tier": "medium",
+                "adjudication_model_tier": "heavy",
+                "enable_large_model_adjudication": False,
+            }
+        )
+    )
+
+    asyncio.run(compress_paper_extraction(MethodGraphDraft(), ClaimsOutcomesDraft(), config=config))
+
+    assert calls[0]["tier"] == "medium"
+    assert calls[0]["response_schema"] is ExtractionDraft
+
+
+def test_repair_uses_repair_tier_not_large_adjudication(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_call_model(tier: str, messages: list[dict[str, str]], response_schema: type, config: Any) -> Any:
+        calls.append({"tier": tier, "messages": messages, "response_schema": response_schema})
+        return ExtractionDraft()
+
+    monkeypatch.setattr("paper_decomposer.extraction.stages.call_model", fake_call_model)
+    config = SimpleNamespace(
+        pipeline=SimpleNamespace(
+            extraction={
+                "default_model_tier": "medium",
+                "repair_model_tier": "cheap",
+                "adjudication_model_tier": "heavy",
+                "enable_large_model_adjudication": False,
+            }
+        )
+    )
+    extraction = PaperExtraction(paper_id="paper-1", extraction_run_id="run-1", title="Tiny")
+    errors = [
+        ExtractionValidationError(
+            code="claims_unattached",
+            message="Claim must attach to graph.",
+            severity=ValidationSeverity.error,
+        )
+    ]
+
+    asyncio.run(repair_paper_extraction(extraction, errors, config=config))
+
+    assert calls[0]["tier"] == "small"
+    assert calls[0]["response_schema"] is ExtractionDraft
