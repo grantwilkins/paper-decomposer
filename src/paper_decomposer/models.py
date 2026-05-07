@@ -301,6 +301,12 @@ async def call_model(
         "temperature": _get_value(model_cfg, "temperature"),
         "max_tokens": _get_value(model_cfg, "max_tokens"),
     }
+    top_p = _get_value_or_default(model_cfg, "top_p", None)
+    if top_p is not None:
+        kwargs_base["top_p"] = top_p
+    reasoning_effort = _get_value_or_default(model_cfg, "reasoning_effort", None)
+    if reasoning_effort is not None:
+        kwargs_base["reasoning_effort"] = reasoning_effort
 
     if response_schema is not None:
         schema_payload = response_schema.model_json_schema()

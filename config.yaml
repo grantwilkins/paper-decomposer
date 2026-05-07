@@ -13,22 +13,26 @@ api:
 
 models:
   small:
-    model: "Qwen/Qwen3.5-9B"
-    context_length: 262144
+    model: "Qwen/Qwen2.5-7B-Instruct-Turbo"
+    context_length: 32768
     supports_structured_output: true
-    input_cost_per_m: 0.10
-    output_cost_per_m: 0.15
+    input_cost_per_m: 0.30
+    output_cost_per_m: 0.30
     temperature: 0.1
     max_tokens: 8192
+    notes: "Explicit cheap tier. Not the default extraction tier because very small models can return empty structured content on long papers."
 
   medium:
-    model: "google/gemma-4-31B-it"
-    context_length: 262144
+    model: "openai/gpt-oss-120b"
+    context_length: 128000
     supports_structured_output: true
-    input_cost_per_m: 0.20
-    output_cost_per_m: 0.50
-    temperature: 0.2
-    max_tokens: 8192
+    input_cost_per_m: 0.15
+    output_cost_per_m: 0.60
+    temperature: 1.0
+    top_p: 1.0
+    reasoning_effort: low
+    max_tokens: 16384
+    notes: "Default extraction tier. Fast structured-output tier; deterministic sanitization demotes invalid repaired nodes."
 
   heavy:
     model: "MiniMaxAI/MiniMax-M2.7"
@@ -51,12 +55,12 @@ pipeline:
     enabled: true
     max_model_calls_per_paper: 5
     max_input_chars_per_stage: 50000
-    default_model_tier: cheap
-    adjudication_model_tier: cheap
+    default_model_tier: medium
+    adjudication_model_tier: medium
     enable_visual_figure_extraction: false
     include_captions: true
     include_table_text: true
-    require_numeric_grounding: true
+    require_numeric_grounding: false
     caps:
       max_system_nodes: 2
       max_method_nodes: 12

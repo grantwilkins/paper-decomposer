@@ -91,6 +91,8 @@ def _test_config(*, max_retries: int = 2, retry_backoff_base: float = 2.0) -> di
                 "model": "medium-model",
                 "temperature": 0.2,
                 "max_tokens": 256,
+                "top_p": 0.9,
+                "reasoning_effort": "low",
                 "input_cost_per_m": 10.0,
                 "output_cost_per_m": 20.0,
             },
@@ -193,6 +195,8 @@ def test_call_model_uses_selected_tier_kwargs_and_returns_plain_text(
     assert sent["model"] == "medium-model"
     assert sent["temperature"] == pytest.approx(0.2)
     assert sent["max_tokens"] == 256
+    assert sent["top_p"] == pytest.approx(0.9)
+    assert sent["reasoning_effort"] == "low"
     assert "response_format" not in sent
 
 

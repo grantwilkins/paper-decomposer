@@ -29,13 +29,14 @@ Integration tests use `pytest.mark.skipif(not os.getenv("TOGETHER_API_KEY"), ...
 
 | File | Subject | Needs `TOGETHER_API_KEY`? |
 |------|---------|---------------------------|
-| [`test_config.py`](test_config.py) | `load_config` happy path, all three tiers present, low-cost small tier, missing-API-key error message. | No |
+| [`test_config.py`](test_config.py) | `load_config` happy path, all three tiers present, medium extraction default, lower-output-cost small tier, missing-API-key error message. | No |
 | [`test_config_semantics.py`](test_config_semantics.py) | Rejection of malformed YAML / non-mapping roots, per-tier values flow to the right runtime fields, `get_config` `lru_cache` behavior, `ConfigError` wrapping. | No |
 | [`test_pdf_parser.py`](test_pdf_parser.py) | Real parse of [fixtures/vllm.pdf](../fixtures/vllm.pdf), plus synthetic uniform-font fixtures built with `fitz` to exercise numbered-header detection, hyphenation cleanup, page-number stripping, min/max section-chars enforcement, artifact capture. | No |
 | [`test_extraction_cli.py`](test_extraction_cli.py) | CLI extraction JSON output remains opt-in and does not require a database. | No |
 | [`test_extraction_db_write_plan.py`](test_extraction_db_write_plan.py) | Local-ID DB write plans preserve paper-local IDs, keep `applies_to` out of method edges, and reject blocking validation failures. | No |
 | [`test_extraction_evidence.py`](test_extraction_evidence.py) | Evidence span selection is stable, high-signal, caption-aware, and does not fabricate unavailable section pages. | No |
 | [`test_extraction_repair.py`](test_extraction_repair.py) | Extraction repair runs once after blocking validation failures, respects model-call budgets, and includes validation context in repair prompts. | No |
+| [`test_extraction_sanitize.py`](test_extraction_sanitize.py) | Sanitization demotes invalid repaired method nodes and prunes dangling local references. | No |
 | [`test_extraction_stages.py`](test_extraction_stages.py) | Extraction stages map `cheap` to `small` and include evidence span IDs in prompts. | No |
 | [`test_extraction_validators.py`](test_extraction_validators.py) | Deterministic validation catches missing mechanism sentences, bad endpoints, promoted demoted items, paper mismatches, and numeric grounding issues. | No |
 | [`test_models.py`](test_models.py) | `call_model`, cost tracking, and model preflight happy paths against Together (live). | Yes (all tests `@api`) |

@@ -23,6 +23,23 @@ _GENERIC_METHOD_NAMES = {
     "system design",
 }
 
+_GENERIC_SECTION_HEADINGS = _GENERIC_METHOD_NAMES | {
+    "abstract",
+    "introduction",
+    "background",
+    "overview",
+    "method",
+    "methods",
+    "design",
+    "evaluation",
+    "experiments",
+    "results",
+    "discussion",
+    "conclusion",
+    "implementation",
+    "appendix",
+}
+
 
 def validate_extraction(
     extraction: PaperExtraction,
@@ -50,7 +67,8 @@ def validate_extraction(
                     object_id=node.local_node_id,
                 )
             )
-        if _normalize(node.canonical_name) in section_titles:
+        normalized_name = _normalize(node.canonical_name)
+        if normalized_name in section_titles and normalized_name in _GENERIC_SECTION_HEADINGS:
             errors.append(
                 _error(
                     "section_heading_promoted",

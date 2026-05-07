@@ -78,6 +78,26 @@ def test_validator_blocks_missing_mechanism_and_missing_edge_endpoint() -> None:
     assert not report.ok
 
 
+def test_validator_allows_named_method_that_matches_section_title() -> None:
+    extraction = _valid_extraction()
+    extraction.evidence_spans[0].section_title = "PagedAttention"
+
+    report = validate_extraction(extraction)
+
+    assert report.ok
+    assert "section_heading_promoted" not in {error.code for error in report.errors}
+
+
+def test_validator_blocks_generic_section_heading_promoted_as_node() -> None:
+    extraction = _valid_extraction()
+    extraction.evidence_spans[0].section_title = "Method"
+    extraction.nodes[0].canonical_name = "Method"
+
+    report = validate_extraction(extraction)
+
+    assert "section_heading_promoted" in {error.code for error in report.blocking_errors}
+
+
 def test_validator_blocks_demoted_item_promoted_as_node() -> None:
     extraction = _valid_extraction()
     extraction.demoted_items.append(

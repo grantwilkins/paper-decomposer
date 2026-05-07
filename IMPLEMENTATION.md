@@ -186,7 +186,7 @@ Output:
 - Candidate systems, methods, settings, and scenarios.
 - High-level central primitive guess.
 
-Model tier: cheap.
+Model tier: medium by default. Small models remain configurable for cheap experiments, but the default should favor structured-output reliability.
 
 ## Method DAG Candidate Extraction
 
@@ -203,7 +203,7 @@ Output:
 - Demoted items.
 - Draft edges.
 
-Model tier: cheap.
+Model tier: medium by default. Small models remain configurable for cheap experiments, but the default should favor structured-output reliability.
 
 ## Claims and Outcomes Extraction
 
@@ -223,7 +223,7 @@ Output:
 - Settings.
 - Evidence spans.
 
-Model tier: cheap.
+Model tier: medium by default. Small models remain configurable for cheap experiments, but the default should favor structured-output reliability.
 
 ## Compression and Claim Attachment
 
@@ -241,14 +241,14 @@ Output:
 - Demoted items preserved.
 - Graph compressed away from paper-outline structure.
 
-Model tier: cheap or medium.
+Model tier: medium by default.
 
 ## Repair and Adjudication
 
 Run only when deterministic validation fails.
 
-- Retry malformed JSON or simple schema failure with the cheap model once.
-- Use a medium model only for repeated validation failure, oversized graphs, paper-outline-shaped graphs, ambiguous claim attachment, or high-value papers.
+- Retry malformed JSON or simple schema failure once on the configured default tier.
+- Use a heavier model only for repeated validation failure, oversized graphs, paper-outline-shaped graphs, ambiguous claim attachment, or high-value papers.
 
 # Prompting Strategy
 
@@ -358,8 +358,8 @@ Cost efficiency is a first-class requirement.
 - Select high-signal sections first.
 - Limit maximum characters or tokens per stage.
 - Cap model calls per paper.
-- Use cheap Together-hosted models by default.
-- Retry malformed JSON once with the cheap model.
+- Use the smallest reliable Together-hosted model by default.
+- Retry malformed JSON once with the configured default tier.
 - Escalate only on validation failure, ambiguous attachment, oversized graph shape, or high-value papers.
 - Track cost using the existing cost tracker in `models.py`.
 - Expose cost summary in the CLI.
@@ -372,12 +372,12 @@ extraction:
   enabled: true
   max_model_calls_per_paper: 5
   max_input_chars_per_stage: 50000
-  default_model_tier: cheap
-  adjudication_model_tier: cheap
+  default_model_tier: medium
+  adjudication_model_tier: medium
   enable_visual_figure_extraction: false
   include_captions: true
   include_table_text: true
-  require_numeric_grounding: true
+  require_numeric_grounding: false
   caps:
     max_system_nodes: 2
     max_method_nodes: 12
@@ -387,7 +387,7 @@ extraction:
     max_demoted_items: 40
 ```
 
-The runtime model tiers are `small`, `medium`, and `heavy`; extraction maps configured `cheap` to `small`.
+The runtime model tiers are `small`, `medium`, and `heavy`; extraction maps configured `cheap` to `small`, but the repository default uses `medium` because very small models can return empty structured content on longer papers. Numeric grounding should default to warnings during extraction dry runs and become blocking only when configured for stricter DB-write workflows.
 
 # Figure and Table Policy
 

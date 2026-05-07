@@ -7,6 +7,7 @@ from .config import load_config
 from .extraction.assembler import assemble_extraction
 from .extraction.contracts import ExtractionCaps, PaperExtraction
 from .extraction.evidence import select_evidence_spans
+from .extraction.sanitize import demote_invalid_method_nodes
 from .extraction.stages import (
     compress_paper_extraction,
     extract_claims_and_outcomes,
@@ -87,6 +88,7 @@ async def extract_document(document: PaperDocument, *, config: Any) -> PaperExtr
             evidence_spans=spans,
             final=repaired,
         )
+        extraction = demote_invalid_method_nodes(extraction)
         report = validate_extraction(
             extraction,
             caps=caps,

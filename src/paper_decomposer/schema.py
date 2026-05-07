@@ -28,6 +28,8 @@ class ModelTierConfig(BaseModel):
     output_cost_per_m: float | None = None
     temperature: float
     max_tokens: int
+    top_p: float | None = None
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
     notes: str | None = None
 
 
