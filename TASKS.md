@@ -54,6 +54,10 @@ Claims may be extracted only after graph nodes exist. If claims exist but no gra
 - Preserve grounded settings, claims, and explicit outcomes through compression and repair; the vLLM fixture should keep model artifacts, workloads, hardware, throughput claims, and memory claims when they appear in selected evidence.
 - Add fixture smoke expectations that vLLM extraction retains the system -> PagedAttention -> reusable KV-cache mechanism shape, demotes implementation details, and preserves at least one grounded performance or memory claim.
 - Narrow final heavy cleanup into targeted adjudication packets once the validator failure taxonomy is stable.
+- Add a blocking validator for outcome-linked performance/memory/overhead claims that lack responsible method/system attachments unless they are purely background/problem claims.
+- Add deterministic outcome normalization that requires each claim-referenced outcome ID to exist exactly once and splits multi-baseline or multi-setting measurements into separate rows.
+- Add setting-specificity checks so claims and outcomes tied to named datasets, tasks, models, or hardware carry those setting IDs, not only broad application settings.
+- Add deterministic evidence cleanup for isolated figure labels, example snippets, and component labels before claim validation.
 - Decide whether `require_numeric_grounding` should block extraction by default or only in DB-write mode.
 - Add optional preflight for only the model tiers used in the current run.
 - Keep visual figure extraction out of scope unless a future explicit feature adds it.

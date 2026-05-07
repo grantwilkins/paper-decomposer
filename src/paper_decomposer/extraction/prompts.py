@@ -2,74 +2,47 @@ from __future__ import annotations
 
 from .contracts import EvidenceSpan, ExtractionCaps, ExtractionValidationError
 
-RULES = (
-    "Return JSON only. The extractor performs open-world paper-local discovery. "
-    "Invent stable typed local IDs when needed, but do not assign global identity or deduplicate across papers. "
-    "Use only supplied evidence span IDs. Do not invent evidence. "
-    "Promote a compact method/settings/problems graph, not a paper outline or evidence-span list. "
-    "Do not emit method_category nodes in paper-local extraction; use category_tags on retained nodes. "
-    "Problem/challenge context belongs in top-level problems, not graph.settings. "
-    "Put scenarios, datasets, hardware, models, workloads, and metrics in graph.settings. "
-    "Baseline systems are reference system nodes, not demoted items. "
-    "Use graph.method_edges only for method/system relationships; use graph.setting_edges for setting relationships; "
-    "use graph.method_setting_links for applies_to, evaluated_on, and uses_artifact. "
-    "Claims are propositions and must not contain metric/value/delta/baseline/comparator row fields. "
-    "Outcomes are measurements and carry metric/value/delta/baseline/comparator rows. "
-    "Claim raw_text must copy source text when possible; finding is the paraphrase. "
-    "Claims must attach to the most specific existing graph node, problem, setting, or outcome. "
-    "Do not infer OCR, plots, charts, or visual content."
-)
+RULES = """
+Return JSON only.
+
+Extraction contract:
+1. Use only supplied evidence span IDs; never infer unseen figure, OCR, chart, or plot content.
+2. Discover paper-local objects only; do not assign global identity. Use typed slug IDs from canonical names:
+   local:system:*, local:method:*, local:setting:*, local:problem:*, local:outcome:*.
+3. Build a compact graph, not a paper outline. Systems/methods go in graph; problems go in problems;
+   datasets, tasks, workloads, hardware, model artifacts, applications, and metrics go in settings.
+4. Methods are reusable mechanisms. Give each method a grounded mechanism_sentence. Use category_tags
+   for broad labels; do not emit method_category nodes.
+5. Claims are compact propositions. Put measurements in outcomes, not claim fields. Link each claim to
+   the most specific methods, settings, problems, and outcomes.
+6. Outcomes are measurement rows. Split rows when baseline/comparator, metric, dataset, task, model,
+   or hardware differs.
+7. Baseline systems are reference system nodes. Demote only implementation support or duplicate details.
+8. Claim evidence must be grounded source text, not component labels, examples, formula fragments, or
+   isolated figure labels.
+""".strip()
 
 CALIBRATION = """
 Graph calibration:
-- Prefer a system -> central primitive -> reusable mechanisms shape.
-- For vLLM-like papers, vLLM is the system, PagedAttention is the central primitive, and reusable
-  mechanisms include block-wise KV cache address translation, on-demand KV block allocation,
-  block-level KV cache sharing, KV block copy-on-write, sequence-group preemption,
-  KV-cache swapping, and KV-cache recomputation.
-- Do not demote those concrete mechanisms merely because a mechanism_sentence is missing. Synthesize
-  a grounded mechanism_sentence from supplied evidence, citing the spans that describe logical and
-  physical KV blocks, block tables, on-demand allocation, reference counts, copy-on-write, all-or-none
-  eviction, swapping, or recomputation.
-- Treat decoding scenarios such as single-sequence generation, parallel sampling, beam search,
-  shared-prefix prompting, and chatbot serving as applications/settings or claim contexts, not
-  first-class method nodes unless the paper introduces a new reusable mechanism for that scenario.
-- Demote implementation support such as fused kernels, fork/append/free APIs, frontend frameworks,
-  scheduler message plumbing, code size, and implementation language.
-- Attach composed end-to-end throughput/request-rate claims to the system. Attach memory-sharing
-  claims to the most specific sharing mechanism. Attach kernel-overhead claims to PagedAttention
-  or its most specific supporting mechanism, and use claim_type=overhead for costs/slowdowns.
-- Split named task/settings nodes such as parallel sampling, beam search, shared-prefix prompting,
-  chatbot serving, ShareGPT, Alpaca, WMT16 English-to-German, OPT-13B, LLaMA-13B, and NVIDIA A100.
-  Do not store problems such as KV-cache memory inefficiency as application settings.
-- For comparison claims, put metric, delta/value, baseline, and comparator text in explicit outcome rows.
-- For claims whose text contains metric plus delta/value plus comparator/baseline, create explicit outcome
-  rows and link the claims to those outcomes.
-- Use meaningful confidence for evidence-copied claims and cited edges; do not emit 0.0 for clearly
-  grounded objects.
+1. Prefer system -> central primitive -> reusable mechanisms.
+2. Keep scenario-specific variants as settings/adapters unless the paper introduces a reusable mechanism.
+3. Do not demote concrete mechanisms only because a mechanism_sentence is missing; write one from evidence.
+4. Attach end-to-end claims to the system, mechanism claims to the responsible mechanism, and overhead
+   claims to the mechanism causing the cost.
+5. Split named tasks, datasets, models, hardware, and workloads into settings and attach outcomes to them.
 """.strip()
 
 BIG_MODEL_COMPACT_RULES = """
-Single-pass compact extraction:
-- Use the supplied evidence as one paper-local draft. Do not summarize the paper.
-- Use typed paper-local IDs such as local:system:*, local:method:*, local:setting:*,
-  local:problem:*, and local:outcome:*. ID syntax and uniqueness do not imply global identity.
-- Keep claims compact. Outcomes carry numeric rows. Settings carry experimental conditions.
-- Do not make one claim per numeric row; link compact claims to explicit outcome rows instead.
-- Each distinct dataset x task x baseline x metric row should be represented as a separate outcome.
-- Preserve numeric text exactly in outcomes, including ranges, multipliers, percentages, and units.
-- Emit at most one system node unless the paper truly introduces multiple systems.
-- Prefer 6-10 reusable method nodes for a full systems paper.
-- Prefer 5-10 settings covering tasks, datasets, workloads, hardware, model artifacts, and metrics.
-- Prefer 5-8 compact claims that state propositions rather than table rows.
-- Do not emit method_category nodes. Put useful coarse labels in category_tags.
-- For systems and methods, include a mechanism_signature with inputs, outputs, operative_move,
-  problem, preconditions, state_modified, failure_modes_or_tradeoffs, typical_settings, and
-  supporting_concepts when grounded.
-- Do not promote GPU kernels, helper APIs, schedulers, workers, or frontend details as methods
-  unless they are central paper contributions.
-- Before returning JSON, internally check that every referenced method_id, setting_id,
-  outcome_id, and evidence span ID resolves. Do not emit validation notes as an output field.
+One-pass extraction:
+1. Return complete ExtractionDraft JSON matching the schema: graph, problems, outcomes, claims, demoted_items.
+2. Use slugged local IDs based on canonical names, for example local:method:paged_attention.
+3. Build the method spine first; keep scenario names as settings unless they introduce reusable mechanisms.
+4. Prefer few reusable methods and compact claims; do not create one claim per numeric row.
+5. Create separate outcome rows for each baseline/comparator x dataset x task x model x hardware x metric combination.
+6. Claims with outcomes must also attach to the responsible method/system unless they are purely background/problem claims.
+7. Synthesize mechanism_sentence for concrete mechanisms; do not demote them only because the sentence was missing.
+8. Internally verify all references resolve, referenced outcomes are unique, numeric text is exact when possible,
+   and claim evidence is not noisy.
 """.strip()
 
 
@@ -78,7 +51,7 @@ def frontmatter_prompt(spans: list[EvidenceSpan]) -> list[dict[str, str]]:
         {"role": "system", "content": _system_prompt()},
         {
             "role": "user",
-            "content": "Produce GraphSketch JSON from frontmatter: paper metadata, central problem, systems, methods, settings, "
+            "content": "Produce GraphSketch JSON: paper metadata, central problems, systems, methods, settings, "
             "and tentative graph edges. Do not extract claims yet.\n\n"
             + _format_spans(spans),
         },
@@ -102,7 +75,8 @@ def claims_outcomes_prompt(spans: list[EvidenceSpan], graph_json: str) -> list[d
         {
             "role": "user",
             "content": "Extract grounded claims and explicit outcomes against the supplied graph. Preserve numeric text exactly. "
-            "Do not emit floating claims; every claim must link to method_ids, problem_ids, setting_ids, or outcome_ids.\n\n"
+            "Do not emit floating claims. Claims with outcome_ids must also include responsible method_ids unless "
+            "they are purely background/problem claims.\n\n"
             f"Graph:\n{graph_json}\n\nEvidence:\n{_format_spans(spans)}",
         },
     ]
@@ -113,10 +87,8 @@ def big_model_compact_prompt(spans: list[EvidenceSpan], caps: ExtractionCaps) ->
         {"role": "system", "content": f"{_system_prompt()}\n\n{BIG_MODEL_COMPACT_RULES}"},
         {
             "role": "user",
-            "content": "Produce a complete compact ExtractionDraft JSON in one pass from the supplied evidence. "
-            "Return graph.systems, graph.methods, graph.method_edges, graph.settings, graph.setting_edges, "
-            "graph.method_setting_links, problems, outcomes, claims, and demoted_items. "
-            "The final JSON must match the schema exactly; do not add validation_notes or commentary.\n\n"
+            "content": "Produce complete compact ExtractionDraft JSON from the supplied evidence. "
+            "Return only schema fields; do not add validation_notes or commentary.\n\n"
             "Output caps:\n"
             f"- system nodes <= {caps.max_system_nodes}\n"
             f"- method nodes <= {caps.max_method_nodes}\n"
@@ -124,14 +96,14 @@ def big_model_compact_prompt(spans: list[EvidenceSpan], caps: ExtractionCaps) ->
             f"- compact claims <= {caps.max_claims}\n"
             f"- outcomes <= {caps.max_outcomes}\n"
             f"- demoted items <= {caps.max_demoted_items}\n\n"
-            "Validation checklist to satisfy before returning:\n"
+            "Hard checks:\n"
             "- every referenced method_id exists in graph.systems or graph.methods\n"
             "- every referenced setting_id exists in graph.settings\n"
             "- every referenced problem_id exists in problems\n"
-            "- every referenced outcome_id exists in outcomes\n"
+            "- every referenced outcome_id exists exactly once in outcomes\n"
             "- every numeric value appears exactly in cited evidence when possible\n"
+            "- claims with outcomes also cite responsible methods unless they are background/problem-only\n"
             "- claim_type matches the metric and finding\n"
-            "- basic-sampling claims are not tagged with parallel_sampling settings\n"
             "- baseline systems are reference system nodes, not demoted items\n"
             "- component_label, example_text, and formula_fragment evidence is not used as claim evidence\n\n"
             f"Evidence:\n{_format_spans(spans, max_span_chars=2200)}",
@@ -144,12 +116,10 @@ def compression_prompt(graph_json: str, claims_json: str) -> list[dict[str, str]
         {"role": "system", "content": _system_prompt()},
         {
             "role": "user",
-            "content": "Compress to final PaperExtraction JSON with graph.systems, graph.methods, graph.method_edges, "
-            "graph.settings, graph.setting_edges, graph.method_setting_links, problems, claims, outcomes, and demoted_items. "
-            "Do not include final candidates. Required: system root, method nodes, method DAG edges, and grounded claims. "
-            "Keep method-family nodes separate from settings. "
-            "Do not put applies_to in method edges. Every method node must include mechanism_sentence. "
-            "Do not create nodes named after section headings. Preserve major claims from the claims input.\n\n"
+            "content": "Compress to final PaperExtraction JSON: graph.systems, graph.methods, graph.method_edges, "
+            "graph.settings, graph.setting_edges, graph.method_setting_links, problems, claims, outcomes, demoted_items. "
+            "Do not include final candidates. Keep methods separate from settings. Every method needs mechanism_sentence. "
+            "Preserve major claims and attach them to the most specific graph objects.\n\n"
             f"Graph:\n{graph_json}\n\nClaims and outcomes:\n{claims_json}",
         },
     ]
@@ -168,14 +138,11 @@ def repair_prompt(
         {"role": "system", "content": _system_prompt()},
         {
             "role": "user",
-            "content": "Repair this extraction JSON so deterministic validation passes. "
-            "If no_graph_nodes, claims_unattached, extraction_graph_missing, system_node_missing, method_edges_missing, or claims_missing appears, "
-            "produce a sparse paper-local method DAG with a system root, method edges, and grounded claims. "
-            "For method_missing_mechanism_sentence, add a grounded mechanism_sentence with inputs, outputs, "
-            "and operative move when the node names a concrete reusable mechanism. Only demote vague section-shaped "
-            "or implementation-detail methods. For concrete_method_demoted_for_missing_mechanism, promote the item "
-            "back to a method node and synthesize the mechanism_sentence from evidence. For section_heading_promoted, demote/remove "
-            "the section-heading node and repair affected edges/links/claims. Keep only supplied evidence IDs.\n\n"
+            "content": "Repair only the listed validation errors and return ExtractionDraft JSON. "
+            "Keep valid graph objects and supplied evidence IDs. If the graph is missing, create a sparse "
+            "system -> method DAG with grounded claims. If a concrete method lacks mechanism_sentence, write one "
+            "from evidence instead of demoting it. If a claim/outcome reference is missing or duplicated, retarget "
+            "it or create the missing grounded row. Remove section-heading nodes and implementation details.\n\n"
             f"Validation errors:\n{errors}\n\nExtraction JSON:\n{extraction_json}\n\nEvidence:\n{_format_spans(evidence_spans, max_span_chars=1000)}",
         },
     ]
@@ -196,12 +163,10 @@ def cleanup_prompt(
         {"role": "system", "content": _system_prompt()},
         {
             "role": "user",
-            "content": "Run a final heavy-model cleanup pass on this validated paper-local extraction. "
-            "Return a complete ExtractionDraft JSON with graph, outcomes, claims, and demoted_items. "
-            "Preserve valid graph structure and grounded claims unless supplied evidence requires a specific fix. "
-            "Improve only extraction-contract issues: ID consistency, setting deduplication, claim attachment, "
-            "method topology, problem modeling, outcome rows, and demotion decisions. "
-            "Do not invent evidence, do not drop major claims, and keep only supplied evidence IDs.\n\n"
+            "content": "Run final cleanup and return complete ExtractionDraft JSON. Preserve valid structure and "
+            "major grounded claims. Fix only extraction-contract issues: slug IDs, setting deduplication, "
+            "claim method attachments, outcome rows, method topology, problem modeling, demotions, and noisy evidence. "
+            "Do not invent evidence; keep only supplied evidence IDs.\n\n"
             f"Validation issues and warnings:\n{issues}\n\nExtraction JSON:\n{extraction_json}\n\n"
             f"Evidence:\n{_format_spans(evidence_spans, max_span_chars=1200)}",
         },
