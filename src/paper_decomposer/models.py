@@ -249,19 +249,60 @@ def _payload_variants_for_schema(payload: Any, response_schema: type[BaseModel])
     return unique_variants
 
 
+def _candidate_rank(payload: Any, response_schema: type[BaseModel]) -> tuple[int, int]:
+    if not isinstance(payload, dict):
+        return (2, 0)
+
+    schema_fields = set(response_schema.model_fields)
+    direct_matches = len(schema_fields.intersection(payload))
+    if direct_matches:
+        return (0, -direct_matches)
+
+    wrapper_matches = 0
+    for wrapper_key in _JSON_WRAPPER_KEYS:
+        nested = payload.get(wrapper_key)
+        if isinstance(nested, dict):
+            wrapper_matches = max(wrapper_matches, len(schema_fields.intersection(nested)))
+    if wrapper_matches:
+        return (1, -wrapper_matches)
+
+    return (1, 0)
+
+
+def _payload_preview(payload: Any) -> str:
+    if isinstance(payload, dict):
+        keys = ", ".join(str(key) for key in list(payload)[:8])
+        return f"dict(keys=[{keys}])"
+    if isinstance(payload, list):
+        preview = payload[:2]
+        return f"list(len={len(payload)}, preview={preview!r})"
+    text = repr(payload)
+    if len(text) > 160:
+        text = f"{text[:157]}..."
+    return f"{type(payload).__name__}({text})"
+
+
 def _parse_structured_content(content: str, response_schema: type[TResponseModel]) -> TResponseModel:
-    candidates = _extract_structured_json_candidates(content)
-    last_error: ValidationError | None = None
+    candidates = sorted(
+        _extract_structured_json_candidates(content),
+        key=lambda candidate: _candidate_rank(candidate, response_schema),
+    )
+    validation_errors: list[str] = []
 
     for candidate in candidates:
         for payload in _payload_variants_for_schema(candidate, response_schema):
             try:
                 return response_schema.model_validate(payload)
             except ValidationError as exc:
-                last_error = exc
+                validation_errors.append(f"{_payload_preview(payload)}: {exc.errors()[0]['msg']}")
 
-    if last_error is not None:
-        raise last_error
+    if validation_errors:
+        previews = "; ".join(_payload_preview(candidate) for candidate in candidates[:4])
+        error_preview = "; ".join(validation_errors[:4])
+        raise ValueError(
+            "Structured response did not match schema "
+            f"{response_schema.__name__}. Candidates: {previews}. Errors: {error_preview}"
+        )
 
     raise ValueError("Structured response did not contain a valid payload for the expected schema.")
 
@@ -372,14 +413,13 @@ async def call_model(
                 console.print(
                     f"  ({tier}) [red]EMPTY RESPONSE[/red] — schema_tokens={schema_tokens}"
                 )
-                if attempt < max_retries:
-                    if not structured_repair_used:
-                        structured_repair_used = True
-                        current_messages = _append_json_repair_suffix(messages)
+                if attempt < max_retries and not structured_repair_used:
+                    structured_repair_used = True
+                    current_messages = _append_json_repair_suffix(messages)
                     wait = retry_backoff_base**attempt
                     await asyncio.sleep(wait)
                     continue
-                raise ValueError("Empty structured content after all retries.")
+                raise ValueError("Empty structured content after one JSON repair retry.")
 
             if response_schema is not None:
                 return _parse_structured_content(content, response_schema)
@@ -392,10 +432,13 @@ async def call_model(
                 style="red dim",
             )
             last_error = exc
-            if response_schema is not None and not structured_repair_used:
+            if response_schema is not None and not structured_repair_used and attempt < max_retries:
                 structured_repair_used = True
                 current_messages = _append_json_repair_suffix(messages)
-            if attempt < max_retries:
+                wait = retry_backoff_base**attempt
+                await asyncio.sleep(wait)
+                continue
+            if response_schema is None and attempt < max_retries:
                 wait = retry_backoff_base**attempt
                 await asyncio.sleep(wait)
                 continue

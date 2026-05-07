@@ -462,6 +462,27 @@ def test_call_model_structured_output_wraps_top_level_list_for_single_field_sche
     assert result.claims == [1, 2, 3]
 
 
+def test_call_model_prefers_schema_shaped_dict_over_earlier_valid_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _test_config(max_retries=0)
+    content = 'Scratch list: [1]\nFinal object: {"claims":[2,3]}'
+    completions = _FakeCompletions([_fake_response(content, 12, 7)])
+    monkeypatch.setattr(model_client, "_get_client", lambda: _FakeClient(completions))
+
+    result = asyncio.run(
+        model_client.call_model(
+            "small",
+            [{"role": "user", "content": "return claims"}],
+            response_schema=ClaimsListOutput,
+            config=config,
+        )
+    )
+
+    assert isinstance(result, ClaimsListOutput)
+    assert result.claims == [2, 3]
+
+
 def test_call_model_structured_output_raises_clear_error_on_invalid_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -584,6 +605,40 @@ def test_call_model_structured_retry_appends_repair_suffix(
     second_call_messages = completions.calls[1]["messages"]
     assert isinstance(second_call_messages, list)
     assert repair_prompt in second_call_messages[-1]["content"]
+
+
+def test_call_model_limits_schema_invalid_content_to_one_repair_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _test_config(max_retries=3, retry_backoff_base=2.0)
+    completions = _FakeCompletions(
+        [
+            _fake_response('{"wrong": 1}', 12, 7),
+            _fake_response('{"still_wrong": 2}', 12, 7),
+            _fake_response('{"answer": 4}', 12, 7),
+        ]
+    )
+    monkeypatch.setattr(model_client, "_get_client", lambda: _FakeClient(completions))
+
+    waits: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr(model_client.asyncio, "sleep", _fake_sleep)
+
+    with pytest.raises(ValueError, match="Structured response did not match schema"):
+        asyncio.run(
+            model_client.call_model(
+                "small",
+                [{"role": "user", "content": "2+2"}],
+                response_schema=AnswerOutput,
+                config=config,
+            )
+        )
+
+    assert len(completions.calls) == 2
+    assert waits == [1.0]
 
 
 def test_call_model_structured_output_parses_flat_claim_list(
