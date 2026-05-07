@@ -8,7 +8,7 @@ from .config import load_config
 from .models import get_cost_tracker, reset_cost_tracker
 from .extraction.assembler import assemble_extraction
 from .extraction.contracts import BigModelComparison, BigModelExtractionResult, ExtractionCaps, PaperExtraction
-from .extraction.evidence import select_evidence_spans, select_targeted_repair_spans
+from .extraction.evidence import select_evidence_spans, select_model_draft_spans, select_targeted_repair_spans
 from .extraction.sanitize import demote_invalid_method_nodes, preserve_graph_and_attach_claims
 from .extraction.stages import (
     cleanup_paper_extraction,
@@ -224,7 +224,8 @@ async def _run_big_model_extraction(
         ),
     )
 
-    final = await extract_big_model_draft(spans, config=config, tier=draft_tier, caps=caps)
+    draft_spans = select_model_draft_spans(spans)
+    final = await extract_big_model_draft(draft_spans or spans, config=config, tier=draft_tier, caps=caps)
     extraction = _normalize_big_model_extraction(
         paper_id=paper_id,
         extraction_run_id=extraction_run_id,

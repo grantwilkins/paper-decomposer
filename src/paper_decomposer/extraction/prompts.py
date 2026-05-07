@@ -3,17 +3,20 @@ from __future__ import annotations
 from .contracts import EvidenceSpan, ExtractionCaps, ExtractionValidationError
 
 RULES = (
-    "Return JSON only. The extractor is graph-first: build the paper-local method/settings graph before claims. "
+    "Return JSON only. The extractor performs open-world paper-local discovery. "
+    "Invent stable typed local IDs when needed, but do not assign global identity or deduplicate across papers. "
     "Use only supplied evidence span IDs. Do not invent evidence. "
-    "Do not create paper-section nodes. Method nodes need inputs, outputs, and operative move. "
-    "Return a sparse method DAG, not a paper outline or evidence-span list. "
-    "Do not emit method_category nodes in normal paper-local extraction; categories belong to later global ontology linking. "
-    "If category labels are useful, attach terse category_tags to retained system/method nodes. "
-    "Put scenarios, datasets, hardware, models, and metrics in graph.settings. "
+    "Promote a compact method/settings/problems graph, not a paper outline or evidence-span list. "
+    "Do not emit method_category nodes in paper-local extraction; use category_tags on retained nodes. "
+    "Problem/challenge context belongs in top-level problems, not graph.settings. "
+    "Put scenarios, datasets, hardware, models, workloads, and metrics in graph.settings. "
+    "Baseline systems are reference system nodes, not demoted items. "
     "Use graph.method_edges only for method/system relationships; use graph.setting_edges for setting relationships; "
     "use graph.method_setting_links for applies_to, evaluated_on, and uses_artifact. "
+    "Claims are propositions and must not contain metric/value/delta/baseline/comparator row fields. "
+    "Outcomes are measurements and carry metric/value/delta/baseline/comparator rows. "
     "Claim raw_text must copy source text when possible; finding is the paraphrase. "
-    "Claims must attach to the most specific existing graph node, setting, or outcome. "
+    "Claims must attach to the most specific existing graph node, problem, setting, or outcome. "
     "Do not infer OCR, plots, charts, or visual content."
 )
 
@@ -39,9 +42,9 @@ Graph calibration:
 - Split named task/settings nodes such as parallel sampling, beam search, shared-prefix prompting,
   chatbot serving, ShareGPT, Alpaca, WMT16 English-to-German, OPT-13B, LLaMA-13B, and NVIDIA A100.
   Do not store problems such as KV-cache memory inefficiency as application settings.
-- For comparison claims, fill metric, delta/value, baseline, and comparator when present in raw text.
-- For claims with metric plus delta/value plus comparator/baseline, create explicit outcome rows and
-  link the claims to those outcomes.
+- For comparison claims, put metric, delta/value, baseline, and comparator text in explicit outcome rows.
+- For claims whose text contains metric plus delta/value plus comparator/baseline, create explicit outcome
+  rows and link the claims to those outcomes.
 - Use meaningful confidence for evidence-copied claims and cited edges; do not emit 0.0 for clearly
   grounded objects.
 """.strip()
@@ -49,14 +52,19 @@ Graph calibration:
 BIG_MODEL_COMPACT_RULES = """
 Single-pass compact extraction:
 - Use the supplied evidence as one paper-local draft. Do not summarize the paper.
+- Use typed paper-local IDs such as local:system:*, local:method:*, local:setting:*,
+  local:problem:*, and local:outcome:*. ID syntax and uniqueness do not imply global identity.
 - Keep claims compact. Outcomes carry numeric rows. Settings carry experimental conditions.
 - Do not make one claim per numeric row; link compact claims to explicit outcome rows instead.
+- Each distinct dataset x task x baseline x metric row should be represented as a separate outcome.
 - Preserve numeric text exactly in outcomes, including ranges, multipliers, percentages, and units.
 - Emit at most one system node unless the paper truly introduces multiple systems.
 - Prefer 6-10 reusable method nodes for a full systems paper.
 - Prefer 5-10 settings covering tasks, datasets, workloads, hardware, model artifacts, and metrics.
 - Prefer 5-8 compact claims that state propositions rather than table rows.
 - Do not emit method_category nodes. Put useful coarse labels in category_tags.
+- For systems and methods, include a mechanism_signature with inputs, outputs, operative_move,
+  problem, preconditions, state_modified, failure_modes_or_tradeoffs, and typical_settings when grounded.
 - Do not promote GPU kernels, helper APIs, schedulers, workers, or frontend details as methods
   unless they are central paper contributions.
 - Before returning JSON, internally check that every referenced method_id, setting_id,
@@ -93,7 +101,7 @@ def claims_outcomes_prompt(spans: list[EvidenceSpan], graph_json: str) -> list[d
         {
             "role": "user",
             "content": "Extract grounded claims and explicit outcomes against the supplied graph. Preserve numeric text exactly. "
-            "Do not emit floating claims; every claim must link to method_ids, setting_ids, or outcome_ids.\n\n"
+            "Do not emit floating claims; every claim must link to method_ids, problem_ids, setting_ids, or outcome_ids.\n\n"
             f"Graph:\n{graph_json}\n\nEvidence:\n{_format_spans(spans)}",
         },
     ]
@@ -106,7 +114,7 @@ def big_model_compact_prompt(spans: list[EvidenceSpan], caps: ExtractionCaps) ->
             "role": "user",
             "content": "Produce a complete compact ExtractionDraft JSON in one pass from the supplied evidence. "
             "Return graph.systems, graph.methods, graph.method_edges, graph.settings, graph.setting_edges, "
-            "graph.method_setting_links, outcomes, claims, and demoted_items. "
+            "graph.method_setting_links, problems, outcomes, claims, and demoted_items. "
             "The final JSON must match the schema exactly; do not add validation_notes or commentary.\n\n"
             "Output caps:\n"
             f"- system nodes <= {caps.max_system_nodes}\n"
@@ -118,12 +126,13 @@ def big_model_compact_prompt(spans: list[EvidenceSpan], caps: ExtractionCaps) ->
             "Validation checklist to satisfy before returning:\n"
             "- every referenced method_id exists in graph.systems or graph.methods\n"
             "- every referenced setting_id exists in graph.settings\n"
+            "- every referenced problem_id exists in problems\n"
             "- every referenced outcome_id exists in outcomes\n"
             "- every numeric value appears exactly in cited evidence when possible\n"
             "- claim_type matches the metric and finding\n"
             "- basic-sampling claims are not tagged with parallel_sampling settings\n"
-            "- method IDs use one namespace and never mix method: prefixes with meth_ IDs\n"
-            "- figure-label spans are not used as claim evidence unless the caption/table text is explicit\n\n"
+            "- baseline systems are reference system nodes, not demoted items\n"
+            "- component_label, example_text, and formula_fragment evidence is not used as claim evidence\n\n"
             f"Evidence:\n{_format_spans(spans, max_span_chars=2200)}",
         },
     ]
@@ -135,7 +144,7 @@ def compression_prompt(graph_json: str, claims_json: str) -> list[dict[str, str]
         {
             "role": "user",
             "content": "Compress to final PaperExtraction JSON with graph.systems, graph.methods, graph.method_edges, "
-            "graph.settings, graph.setting_edges, graph.method_setting_links, claims, outcomes, and demoted_items. "
+            "graph.settings, graph.setting_edges, graph.method_setting_links, problems, claims, outcomes, and demoted_items. "
             "Do not include final candidates. Required: system root, method nodes, method DAG edges, and grounded claims. "
             "Keep method-family nodes separate from settings. "
             "Do not put applies_to in method edges. Every method node must include mechanism_sentence. "
@@ -190,7 +199,7 @@ def cleanup_prompt(
             "Return a complete ExtractionDraft JSON with graph, outcomes, claims, and demoted_items. "
             "Preserve valid graph structure and grounded claims unless supplied evidence requires a specific fix. "
             "Improve only extraction-contract issues: ID consistency, setting deduplication, claim attachment, "
-            "method topology, metric/value/baseline/comparator fields, outcome rows, and demotion decisions. "
+            "method topology, problem modeling, outcome rows, and demotion decisions. "
             "Do not invent evidence, do not drop major claims, and keep only supplied evidence IDs.\n\n"
             f"Validation issues and warnings:\n{issues}\n\nExtraction JSON:\n{extraction_json}\n\n"
             f"Evidence:\n{_format_spans(evidence_spans, max_span_chars=1200)}",
@@ -204,12 +213,12 @@ def _format_spans(spans: list[EvidenceSpan], *, max_span_chars: int = 1800) -> s
         text = span.text
         if len(text) > max_span_chars:
             text = text[:max_span_chars].rsplit(" ", 1)[0].strip()
-        lines.append(f"[{span.span_id}] {span.section_title} ({span.source_kind}): {text}")
+        lines.append(f"[{span.span_id}] {span.section_title} ({span.source_kind}/{span.evidence_class}): {text}")
     return "\n".join(lines)
 
 
 def _system_prompt() -> str:
-    return f"{RULES}\n\n{CALIBRATION}"
+    return RULES
 
 
 __all__ = [

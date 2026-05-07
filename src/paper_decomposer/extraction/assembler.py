@@ -18,6 +18,7 @@ def assemble_extraction(
         title=title,
         evidence_spans=evidence_spans,
         graph=final.graph,
+        problems=final.problems,
         outcomes=final.outcomes,
         claims=final.claims,
         demoted_items=final.demoted_items,

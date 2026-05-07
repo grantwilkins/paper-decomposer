@@ -73,7 +73,6 @@ def test_extract_document_runs_enabled_heavy_cleanup_after_valid_draft(
             claims=[
                 extraction.claims[0].model_copy(
                     update={
-                        "metric": "cache-block translation",
                         "finding": "TinyAttention performs on-demand cache-block translation.",
                     }
                 )
@@ -91,7 +90,7 @@ def test_extract_document_runs_enabled_heavy_cleanup_after_valid_draft(
     )
 
     assert len(cleanup_inputs) == 1
-    assert extraction.claims[0].metric == "cache-block translation"
+    assert extraction.claims[0].finding == "TinyAttention performs on-demand cache-block translation."
     assert extraction.claims[0].method_ids == ["m1"]
 
 

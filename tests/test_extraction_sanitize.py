@@ -116,6 +116,7 @@ def test_invalid_method_nodes_are_demoted_and_references_are_pruned() -> None:
                 metric="throughput",
                 method_ids=["bad-mechanism"],
                 setting_ids=["setting-1"],
+                delta="2x",
                 evidence_span_ids=["s1"],
             )
         ],
@@ -331,14 +332,14 @@ def test_graph_quality_repair_tightens_vllm_topology_settings_claims_and_outcome
         ],
         settings=[
             ExtractedSetting(
-                local_setting_id="setting:KV_cache_memory_inefficiency",
+                local_setting_id="local:setting:KV_cache_memory_inefficiency",
                 kind="application",
                 canonical_name="KV-cache memory inefficiency",
                 description="Problem context.",
                 evidence_span_ids=["abstract"],
             ),
             ExtractedSetting(
-                local_setting_id="setting:decoding_scenarios",
+                local_setting_id="local:setting:decoding_scenarios",
                 kind="application",
                 canonical_name="Decoding scenarios",
                 description="Coarse bucket.",
@@ -348,13 +349,13 @@ def test_graph_quality_repair_tightens_vllm_topology_settings_claims_and_outcome
         method_setting_links=[
             ExtractedMethodSettingLink(
                 method_id="method:PagedAttention",
-                setting_id="setting:KV_cache_memory_inefficiency",
+                setting_id="local:setting:KV_cache_memory_inefficiency",
                 relation_kind="applies_to",
                 evidence_span_ids=["abstract"],
             ),
             ExtractedMethodSettingLink(
                 method_id="method:block_level_sharing",
-                setting_id="setting:decoding_scenarios",
+                setting_id="local:setting:decoding_scenarios",
                 relation_kind="applies_to",
                 evidence_span_ids=["method"],
             ),
@@ -367,10 +368,7 @@ def test_graph_quality_repair_tightens_vllm_topology_settings_claims_and_outcome
                 raw_text="vLLM can sustain 2x higher request rates than Orca.",
                 finding="vLLM can sustain 2x higher request rates than Orca.",
                 method_ids=["method:PagedAttention"],
-                setting_ids=["setting:KV_cache_memory_inefficiency"],
-                metric="request rate",
-                delta="2x",
-                comparator="Orca",
+                setting_ids=["local:setting:KV_cache_memory_inefficiency"],
                 evidence_span_ids=["eval"],
             ),
             ExtractedClaim(
@@ -380,10 +378,7 @@ def test_graph_quality_repair_tightens_vllm_topology_settings_claims_and_outcome
                 raw_text="vLLM achieves 6.1%-9.8% memory saving on parallel sampling and 37.6%-55.2% on beam search.",
                 finding="vLLM saves memory on parallel sampling and beam search.",
                 method_ids=["method:block_level_sharing"],
-                setting_ids=["setting:decoding_scenarios"],
-                metric="memory saving",
-                delta="6.1%-55.2%",
-                comparator="without sharing",
+                setting_ids=["local:setting:decoding_scenarios"],
                 evidence_span_ids=["eval"],
             ),
             ExtractedClaim(
@@ -393,9 +388,6 @@ def test_graph_quality_repair_tightens_vllm_topology_settings_claims_and_outcome
                 raw_text="PagedAttention incurs 20-26% higher attention kernel latency compared to FasterTransformer.",
                 finding="PagedAttention incurs 20-26% higher attention kernel latency.",
                 method_ids=["method:PagedAttention"],
-                metric="attention kernel latency",
-                delta="20-26%",
-                comparator="FasterTransformer",
                 evidence_span_ids=["eval"],
             ),
         ],
@@ -404,18 +396,18 @@ def test_graph_quality_repair_tightens_vllm_topology_settings_claims_and_outcome
     repaired = preserve_graph_and_attach_claims(extraction)
 
     edge_pairs = {(edge.parent_id, edge.child_id) for edge in repaired.edges}
-    assert ("sys_vllm", "meth_pagedattention") in edge_pairs
-    assert ("meth_block_level_sharing", "meth_copy_on_write") in edge_pairs
-    assert ("meth_sequence_group_preemption", "meth_kv_cache_swapping") in edge_pairs
-    assert ("meth_sequence_group_preemption", "meth_kv_cache_recomputation") in edge_pairs
+    assert ("local:system:vllm", "local:method:pagedattention") in edge_pairs
+    assert ("local:method:block_level_sharing", "local:method:copy_on_write") in edge_pairs
+    assert ("local:method:sequence_group_preemption", "local:method:kv_cache_swapping") in edge_pairs
+    assert ("local:method:sequence_group_preemption", "local:method:kv_cache_recomputation") in edge_pairs
 
     method_names = {node.canonical_name for node in repaired.graph.methods}
     assert "Block-wise KV cache address translation" in method_names
     assert "Sequence-group preemption" in method_names
 
     setting_ids = {setting.local_setting_id for setting in repaired.settings}
-    assert "setting:KV_cache_memory_inefficiency" not in setting_ids
-    assert {"setting:llm_serving", "setting:parallel_sampling", "setting:beam_search"} <= setting_ids
+    assert "local:setting:KV_cache_memory_inefficiency" not in setting_ids
+    assert {"local:setting:llm_serving", "local:setting:parallel_sampling", "local:setting:beam_search"} <= setting_ids
     assert {item.name for item in repaired.demoted_items} >= {
         "KV-cache memory inefficiency",
         "Decoding scenarios",
@@ -423,9 +415,9 @@ def test_graph_quality_repair_tightens_vllm_topology_settings_claims_and_outcome
     }
 
     claim_by_id = {claim.claim_id: claim for claim in repaired.claims}
-    assert claim_by_id["c1"].method_ids == ["sys_vllm"]
-    assert "setting:llm_serving" in claim_by_id["c1"].setting_ids
-    assert {"setting:parallel_sampling", "setting:beam_search"} <= set(claim_by_id["c2"].setting_ids)
+    assert claim_by_id["c1"].method_ids == ["local:system:vllm"]
+    assert "local:setting:llm_serving" in claim_by_id["c1"].setting_ids
+    assert {"local:setting:parallel_sampling", "local:setting:beam_search"} <= set(claim_by_id["c2"].setting_ids)
     assert claim_by_id["c3"].claim_type == "overhead"
     assert all(claim.outcome_ids for claim in repaired.claims)
     assert {outcome.outcome_id for outcome in repaired.outcomes} == {
@@ -572,8 +564,6 @@ def test_cleanup_collapses_vllm_scenario_kernels_and_categories_out_of_main_dag(
                 ),
                 finding="vLLM saves memory on parallel sampling and beam search.",
                 method_ids=["method:parallel_sampling_prompt_kv_sharing", "method:beam_search_kv_block_sharing"],
-                metric="memory saving",
-                comparator="without sharing",
                 evidence_span_ids=["eval"],
             ),
             ExtractedClaim(
@@ -583,9 +573,6 @@ def test_cleanup_collapses_vllm_scenario_kernels_and_categories_out_of_main_dag(
                 raw_text="PagedAttention incurs 20-26% higher attention kernel latency compared to FasterTransformer.",
                 finding="PagedAttention incurs attention-kernel overhead.",
                 method_ids=["method:fused_block_copy_kernel"],
-                metric="attention kernel latency",
-                delta="20-26%",
-                comparator="FasterTransformer",
                 evidence_span_ids=["eval"],
             ),
         ],
@@ -601,19 +588,19 @@ def test_cleanup_collapses_vllm_scenario_kernels_and_categories_out_of_main_dag(
     assert "fused block copy kernel" not in method_names
     assert "KV cache management" not in method_names
     tags_by_method = {node.local_node_id: node.category_tags for node in repaired.graph.methods}
-    assert "kv_cache_management" in tags_by_method["meth_pagedattention"]
+    assert "kv_cache_management" in tags_by_method["local:method:pagedattention"]
 
     link_pairs = {(link.method_id, link.setting_id) for link in repaired.method_setting_links}
     assert {
-        ("meth_block_level_kv_cache_sharing", "setting:parallel_sampling"),
-        ("meth_block_level_kv_cache_sharing", "setting:beam_search"),
-        ("meth_block_level_kv_cache_sharing", "setting:shared_prefix_prompting"),
+        ("local:method:block_level_kv_cache_sharing", "local:setting:parallel_sampling"),
+        ("local:method:block_level_kv_cache_sharing", "local:setting:beam_search"),
+        ("local:method:block_level_kv_cache_sharing", "local:setting:shared_prefix_prompting"),
     } <= link_pairs
 
     claim_by_id = {claim.claim_id: claim for claim in repaired.claims}
-    assert claim_by_id["c_memory"].method_ids == ["meth_block_level_kv_cache_sharing"]
-    assert {"setting:parallel_sampling", "setting:beam_search"} <= set(claim_by_id["c_memory"].setting_ids)
-    assert claim_by_id["c_kernel"].method_ids == ["meth_pagedattention"]
+    assert claim_by_id["c_memory"].method_ids == ["local:method:block_level_kv_cache_sharing"]
+    assert {"local:setting:parallel_sampling", "local:setting:beam_search"} <= set(claim_by_id["c_memory"].setting_ids)
+    assert claim_by_id["c_kernel"].method_ids == ["local:method:pagedattention"]
     assert claim_by_id["c_kernel"].claim_type == "overhead"
     assert {outcome.outcome_id for outcome in repaired.outcomes} >= {
         "outcome:c_memory:parallel_sampling",
@@ -691,7 +678,7 @@ def test_cleanup_normalizes_ids_dedupes_settings_and_splits_numeric_outcomes() -
                 evidence_span_ids=["s2"],
             ),
             ExtractedSetting(
-                local_setting_id="setting:opt_13b",
+                local_setting_id="local:setting:opt_13b",
                 kind="model_artifact",
                 canonical_name="OPT-13B",
                 description="Canonical deterministic setting.",
@@ -709,7 +696,7 @@ def test_cleanup_normalizes_ids_dedupes_settings_and_splits_numeric_outcomes() -
                 ),
                 finding="vLLM improves request rates over Orca.",
                 method_ids=["system:vLLM"],
-                setting_ids=["set_model_opt13b", "setting:opt_13b"],
+                setting_ids=["set_model_opt13b", "local:setting:opt_13b"],
                 evidence_span_ids=["s2"],
             )
         ],
@@ -717,15 +704,13 @@ def test_cleanup_normalizes_ids_dedupes_settings_and_splits_numeric_outcomes() -
 
     repaired = preserve_graph_and_attach_claims(extraction)
 
-    assert {node.local_node_id for node in repaired.nodes} == {"sys_vllm", "meth_pagedattention"}
+    assert {node.local_node_id for node in repaired.nodes} == {"local:system:vllm", "local:method:pagedattention"}
     assert [setting.local_setting_id for setting in repaired.settings if setting.canonical_name == "OPT-13B"] == [
-        "setting:opt_13b"
+        "local:setting:opt_13b"
     ]
     claim = repaired.claims[0]
-    assert claim.method_ids == ["sys_vllm"]
-    assert claim.setting_ids.count("setting:opt_13b") == 1
-    assert claim.metric == "request rate"
-    assert claim.comparator == "Orca (Oracle/Max)"
+    assert claim.method_ids == ["local:system:vllm"]
+    assert claim.setting_ids.count("local:setting:opt_13b") == 1
     assert set(claim.outcome_ids) == {"outcome:c1:orca_oracle", "outcome:c1:orca_max"}
     outcome_by_id = {outcome.outcome_id: outcome for outcome in repaired.outcomes}
     assert outcome_by_id["outcome:c1:orca_oracle"].delta == "1.7×–2.7×"

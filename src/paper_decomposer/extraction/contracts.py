@@ -23,6 +23,27 @@ ClaimType = Literal[
 ]
 NodeStatus = Literal["claimed_new", "reference", "uncertain"]
 SourceKind = Literal["abstract", "paragraph", "caption", "table_text", "contribution", "conclusion"]
+EvidenceClass = Literal[
+    "prose",
+    "caption",
+    "table",
+    "component_label",
+    "example_text",
+    "frontmatter",
+    "formula_fragment",
+]
+ResolutionRelationKind = Literal[
+    "same_as",
+    "variant_of",
+    "uses",
+    "extends",
+    "subsumes",
+    "is_subsumed_by",
+    "reimplements",
+    "compared_against",
+    "distinct",
+    "uncertain",
+]
 
 
 class ValidationSeverity(str, Enum):
@@ -42,6 +63,7 @@ class EvidenceSpan(BaseModel):
     page_end: int | None = None
     artifact_id: str | None = None
     source_kind: SourceKind = "paragraph"
+    evidence_class: EvidenceClass = "prose"
 
     @field_validator("span_id", "paper_id", "section_title", "section_kind", "text")
     @classmethod
@@ -62,6 +84,45 @@ class CandidateNode(BaseModel):
     confidence: float | None = None
 
 
+class ProblemStatement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    problem_id: str
+    statement: str
+    description: str | None = None
+    evidence_span_ids: list[str]
+    confidence: float | None = None
+
+    @field_validator("problem_id", "statement")
+    @classmethod
+    def _non_empty_text(cls, value: str) -> str:
+        cleaned = " ".join(value.strip().split())
+        if not cleaned:
+            raise ValueError("field must be non-empty")
+        return cleaned
+
+
+class MechanismSignature(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    problem: str | None = None
+    inputs: list[str] = Field(default_factory=list)
+    outputs: list[str] = Field(default_factory=list)
+    operative_move: str
+    preconditions: list[str] = Field(default_factory=list)
+    state_modified: list[str] = Field(default_factory=list)
+    failure_modes_or_tradeoffs: list[str] = Field(default_factory=list)
+    typical_settings: list[str] = Field(default_factory=list)
+
+    @field_validator("operative_move")
+    @classmethod
+    def _non_empty_text(cls, value: str) -> str:
+        cleaned = " ".join(value.strip().split())
+        if not cleaned:
+            raise ValueError("field must be non-empty")
+        return cleaned
+
+
 class ExtractedNode(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -73,10 +134,12 @@ class ExtractedNode(BaseModel):
     description: str
     status: NodeStatus = "uncertain"
     introduced_by: str | None = None
+    problem_ids: list[str] = Field(default_factory=list)
     granularity_rationale: str
     evidence_span_ids: list[str]
     confidence: float | None = None
     mechanism_sentence: str | None = None
+    mechanism_signature: MechanismSignature | None = None
 
     @field_validator("local_node_id", "canonical_name", "description", "granularity_rationale")
     @classmethod
@@ -156,12 +219,8 @@ class ExtractedClaim(BaseModel):
     finding: str
     method_ids: list[str] = Field(default_factory=list)
     setting_ids: list[str] = Field(default_factory=list)
+    problem_ids: list[str] = Field(default_factory=list)
     outcome_ids: list[str] = Field(default_factory=list)
-    metric: str | None = None
-    value: str | None = None
-    delta: str | None = None
-    baseline: str | None = None
-    comparator: str | None = None
     evidence_span_ids: list[str]
     confidence: float | None = None
 
@@ -234,6 +293,7 @@ class PaperExtraction(BaseModel):
     title: str
     evidence_spans: list[EvidenceSpan] = Field(default_factory=list)
     graph: PaperGraph = Field(default_factory=PaperGraph)
+    problems: list[ProblemStatement] = Field(default_factory=list)
     outcomes: list[ExtractedOutcome] = Field(default_factory=list)
     claims: list[ExtractedClaim] = Field(default_factory=list)
     demoted_items: list[DemotedItem] = Field(default_factory=list)
@@ -341,12 +401,40 @@ class BigModelComparison(BaseModel):
     results: list[BigModelExtractionResult] = Field(default_factory=list)
 
 
+class LocalEntityResolutionTask(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    local_entity_id: str
+    entity_kind: Literal["system", "method", "setting", "problem"]
+    canonical_name: str
+    aliases: list[str] = Field(default_factory=list)
+    description: str | None = None
+    problem_ids: list[str] = Field(default_factory=list)
+    mechanism_signature: MechanismSignature | None = None
+    allowed_relations: list[ResolutionRelationKind] = Field(
+        default_factory=lambda: [
+            "same_as",
+            "variant_of",
+            "uses",
+            "extends",
+            "subsumes",
+            "is_subsumed_by",
+            "reimplements",
+            "compared_against",
+            "distinct",
+            "uncertain",
+        ]
+    )
+    evidence_span_ids: list[str] = Field(default_factory=list)
+
+
 __all__ = [
     "BigModelComparison",
     "BigModelExtractionResult",
     "CandidateNode",
     "ClaimType",
     "DemotedItem",
+    "EvidenceClass",
     "EvidenceSpan",
     "ExtractedClaim",
     "ExtractedEdge",
@@ -361,9 +449,13 @@ __all__ = [
     "MethodNodeKind",
     "MethodRelationKind",
     "MethodSettingRelationKind",
+    "MechanismSignature",
     "NodeStatus",
     "PaperGraph",
     "PaperExtraction",
+    "ProblemStatement",
+    "ResolutionRelationKind",
+    "LocalEntityResolutionTask",
     "SettingRelationKind",
     "SettingKind",
     "SourceKind",

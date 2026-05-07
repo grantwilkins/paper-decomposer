@@ -52,61 +52,61 @@ _PROBLEM_SETTING_TERMS = (
 
 _NAMED_SETTINGS = (
     (
-        "setting:llm_serving",
+        "local:setting:llm_serving",
         "LLM serving",
         "application",
         ("llm serving", "serving systems", "serving system"),
         "Serving large language model requests.",
     ),
     (
-        "setting:basic_sampling",
+        "local:setting:basic_sampling",
         "basic sampling",
         "task",
         ("basic sampling", "one sample per request"),
         "Single-sample generation requests.",
     ),
     (
-        "setting:parallel_sampling",
+        "local:setting:parallel_sampling",
         "parallel sampling",
         "task",
         ("parallel sampling", "parallel generation"),
         "Generating multiple sampled outputs for one prompt.",
     ),
     (
-        "setting:beam_search",
+        "local:setting:beam_search",
         "beam search",
         "task",
         ("beam search", "beam width"),
         "Beam-search decoding.",
     ),
     (
-        "setting:shared_prefix_prompting",
+        "local:setting:shared_prefix_prompting",
         "shared-prefix prompting",
         "task",
         ("shared prefix", "prefix sharing", "shared-prefix"),
         "Requests whose prompts share a reusable prefix.",
     ),
     (
-        "setting:chatbot_serving",
+        "local:setting:chatbot_serving",
         "chatbot serving",
         "application",
         ("chatbot",),
         "Chatbot request serving.",
     ),
-    ("setting:sharegpt", "ShareGPT", "dataset", ("sharegpt",), "ShareGPT workload dataset."),
-    ("setting:alpaca", "Alpaca", "dataset", ("alpaca",), "Alpaca workload dataset."),
+    ("local:setting:sharegpt", "ShareGPT", "dataset", ("sharegpt",), "ShareGPT workload dataset."),
+    ("local:setting:alpaca", "Alpaca", "dataset", ("alpaca",), "Alpaca workload dataset."),
     (
-        "setting:wmt16_english_to_german",
+        "local:setting:wmt16_english_to_german",
         "WMT16 English-to-German",
         "dataset",
         ("wmt16", "english-to-german", "english to german"),
         "WMT16 English-to-German translation workload.",
     ),
-    ("setting:opt_13b", "OPT-13B", "model_artifact", ("opt-13b",), "OPT-13B model artifact."),
-    ("setting:opt_66b", "OPT-66B", "model_artifact", ("opt-66b",), "OPT-66B model artifact."),
-    ("setting:opt_175b", "OPT-175B", "model_artifact", ("opt-175b",), "OPT-175B model artifact."),
-    ("setting:llama_13b", "LLaMA-13B", "model_artifact", ("llama-13b",), "LLaMA-13B model artifact."),
-    ("setting:nvidia_a100", "NVIDIA A100", "hardware", ("nvidia a100", "a100"), "NVIDIA A100 GPU hardware."),
+    ("local:setting:opt_13b", "OPT-13B", "model_artifact", ("opt-13b",), "OPT-13B model artifact."),
+    ("local:setting:opt_66b", "OPT-66B", "model_artifact", ("opt-66b",), "OPT-66B model artifact."),
+    ("local:setting:opt_175b", "OPT-175B", "model_artifact", ("opt-175b",), "OPT-175B model artifact."),
+    ("local:setting:llama_13b", "LLaMA-13B", "model_artifact", ("llama-13b",), "LLaMA-13B model artifact."),
+    ("local:setting:nvidia_a100", "NVIDIA A100", "hardware", ("nvidia a100", "a100"), "NVIDIA A100 GPU hardware."),
 )
 
 _COMPONENT_DEMOTION_SPECS = (
@@ -132,11 +132,11 @@ _IMPLEMENTATION_DETAIL_MARKERS = (
 )
 
 _SCENARIO_SETTING_MARKERS = (
-    ("setting:basic_sampling", ("single sequence", "single-sequence", "basic sampling")),
-    ("setting:parallel_sampling", ("parallel sampling", "parallel generation", "parallel-sampling")),
-    ("setting:beam_search", ("beam search", "beam-search", "beam width")),
-    ("setting:shared_prefix_prompting", ("shared prefix", "shared-prefix", "prefix sharing")),
-    ("setting:chatbot_serving", ("chatbot", "chatbot serving")),
+    ("local:setting:basic_sampling", ("single sequence", "single-sequence", "basic sampling")),
+    ("local:setting:parallel_sampling", ("parallel sampling", "parallel generation", "parallel-sampling")),
+    ("local:setting:beam_search", ("beam search", "beam-search", "beam width")),
+    ("local:setting:shared_prefix_prompting", ("shared prefix", "shared-prefix", "prefix sharing")),
+    ("local:setting:chatbot_serving", ("chatbot", "chatbot serving")),
 )
 
 _SCENARIO_ADAPTER_MECHANISM_MARKERS = (
@@ -332,9 +332,15 @@ def _normalize_nodes(nodes: list[ExtractedNode], replacements: dict[str, str]) -
 
 def _normalized_node_id(node: ExtractedNode) -> str:
     if node.local_node_id.startswith("method:"):
-        return f"meth_{_slug(node.local_node_id.removeprefix('method:'))}"
+        return f"local:method:{_slug(node.local_node_id.removeprefix('method:'))}"
     if node.local_node_id.startswith("system:"):
-        return f"sys_{_slug(node.local_node_id.removeprefix('system:'))}"
+        return f"local:system:{_slug(node.local_node_id.removeprefix('system:'))}"
+    if node.local_node_id.startswith(("local:method:", "local:system:")):
+        return node.local_node_id
+    if node.kind == "system" and node.local_node_id.startswith("sys_"):
+        return f"local:system:{_slug(node.local_node_id.removeprefix('sys_'))}"
+    if node.kind == "method" and node.local_node_id.startswith("meth_"):
+        return f"local:method:{_slug(node.local_node_id.removeprefix('meth_'))}"
     return node.local_node_id
 
 
@@ -869,7 +875,7 @@ def _retarget_overall_system_claim(claim: ExtractedClaim, graph: PaperGraph) -> 
     text = _normalize_identifier(f"{claim.raw_text} {claim.finding}")
     if not _name_appears_in_text(system.canonical_name, text):
         return claim
-    metric_text = _normalize_identifier(" ".join(part for part in [claim.metric, claim.raw_text, claim.finding] if part))
+    metric_text = _normalize_identifier(f"{claim.raw_text} {claim.finding}")
     if not any(term in metric_text for term in ("request rate", "throughput", "latency", "requests")):
         return claim
     if _is_overhead_claim(claim):
@@ -888,7 +894,7 @@ def _retarget_claim_settings(claim: ExtractedClaim, graph: PaperGraph) -> Extrac
         matching_ids = [
             setting.local_setting_id
             for setting in graph.settings
-            if setting.local_setting_id == "setting:llm_serving"
+            if setting.local_setting_id == "local:setting:llm_serving"
         ]
     if not matching_ids:
         return claim
@@ -932,7 +938,7 @@ def _materialize_claim_outcomes(extraction: PaperExtraction) -> PaperExtraction:
 
 def _claim_outcome_specs(claim: ExtractedClaim) -> list[dict[str, str | None]]:
     text = _claim_text(claim)
-    metric = claim.metric or _infer_metric(text)
+    metric = _infer_metric(text)
     if metric is None:
         return []
 
@@ -940,18 +946,18 @@ def _claim_outcome_specs(claim: ExtractedClaim) -> list[dict[str, str | None]]:
     if specs:
         return specs
 
-    delta = claim.delta or claim.value or _first_magnitude(text)
-    comparator = claim.comparator or claim.baseline or _infer_comparator(text, metric)
+    delta = _first_magnitude(text)
+    comparator = _infer_comparator(text, metric)
     if not delta or not comparator:
         return []
     return [
         {
             "outcome_id": f"outcome:{claim.claim_id}",
             "metric": metric,
-            "delta": delta if claim.value is None else claim.delta,
-            "value": claim.value,
-            "baseline": claim.baseline,
-            "comparator": comparator if claim.baseline is None else claim.comparator,
+            "delta": delta,
+            "value": None,
+            "baseline": None,
+            "comparator": comparator,
         }
     ]
 
@@ -996,29 +1002,13 @@ def _outcome_spec(
         "metric": metric,
         "delta": delta,
         "value": None,
-        "baseline": claim.baseline,
+        "baseline": None,
         "comparator": comparator,
     }
 
 
 def _populate_claim_structured_fields(claim: ExtractedClaim) -> ExtractedClaim:
-    text = _claim_text(claim)
-    updates: dict[str, str] = {}
-    if claim.metric is None:
-        metric = _infer_metric(text)
-        if metric is not None:
-            updates["metric"] = metric
-    if claim.delta is None and claim.value is None:
-        delta = _first_magnitude(text)
-        if delta is not None:
-            updates["delta"] = delta
-    if claim.comparator is None and claim.baseline is None:
-        comparator = _infer_comparator(text, updates.get("metric") or claim.metric)
-        if comparator is not None:
-            updates["comparator"] = comparator
-    if not updates:
-        return claim
-    return claim.model_copy(update=updates)
+    return claim
 
 
 def _claim_text(claim: ExtractedClaim) -> str:
@@ -1085,13 +1075,6 @@ def _clean_delta(value: str) -> str:
     return cleaned
 
 
-def _claim_requires_outcome(claim: ExtractedClaim) -> bool:
-    has_metric = bool(claim.metric)
-    has_value = bool(claim.value or claim.delta)
-    has_comparator = bool(claim.baseline or claim.comparator)
-    return has_metric and has_value and has_comparator
-
-
 def _tighten_blockwise_node(node: ExtractedNode) -> ExtractedNode:
     normalized_name = _normalize_identifier(node.canonical_name)
     if normalized_name not in {"block wise kv cache", "blockwise kv blocks", "block wise kv blocks"}:
@@ -1139,7 +1122,7 @@ def _sequence_group_preemption_node(
     if not span_ids:
         span_ids = [span_id for node in (swapping, recomputation) if node is not None for span_id in node.evidence_span_ids]
     return ExtractedNode(
-        local_node_id="meth_sequence_group_preemption",
+        local_node_id="local:method:sequence_group_preemption",
         kind="method",
         canonical_name="Sequence-group preemption",
         description="Scheduling policy that preempts whole sequence groups and recovers their KV cache later.",
@@ -1365,17 +1348,17 @@ def _repair_method_setting_links(
     repaired: list[ExtractedMethodSettingLink] = []
     for link in links:
         if link.setting_id in removed_setting_ids:
-            if "setting:llm_serving" in replacement_ids:
-                repaired.append(link.model_copy(update={"setting_id": "setting:llm_serving"}))
+            if "local:setting:llm_serving" in replacement_ids:
+                repaired.append(link.model_copy(update={"setting_id": "local:setting:llm_serving"}))
             continue
         if link.setting_id in coarse_scenario_ids:
             scenario_ids = [
                 setting_id
                 for setting_id in (
-                    "setting:parallel_sampling",
-                    "setting:beam_search",
-                    "setting:shared_prefix_prompting",
-                    "setting:chatbot_serving",
+                    "local:setting:parallel_sampling",
+                    "local:setting:beam_search",
+                    "local:setting:shared_prefix_prompting",
+                    "local:setting:chatbot_serving",
                 )
                 if setting_id in replacement_ids
             ]
@@ -1466,7 +1449,7 @@ def _setting_matches_claim(setting: ExtractedSetting, normalized_claim_text: str
 
 
 def _is_overhead_claim(claim: ExtractedClaim) -> bool:
-    text = _normalize_identifier(f"{claim.raw_text} {claim.finding} {claim.metric or ''}")
+    text = _normalize_identifier(f"{claim.raw_text} {claim.finding}")
     return any(
         marker in text
         for marker in (

@@ -3,6 +3,7 @@ from __future__ import annotations
 from .contracts import (
     CandidateNode,
     DemotedItem,
+    EvidenceClass,
     EvidenceSpan,
     ExtractedClaim,
     ExtractedEdge,
@@ -14,16 +15,22 @@ from .contracts import (
     ExtractionCaps,
     ExtractionValidationError,
     ExtractionValidationReport,
+    LocalEntityResolutionTask,
+    MechanismSignature,
     PaperGraph,
     PaperExtraction,
+    ProblemStatement,
+    ResolutionRelationKind,
     ValidationSeverity,
 )
-from .evidence import select_evidence_spans
+from .evidence import select_evidence_spans, select_model_draft_spans
+from .resolution import build_local_entity_resolution_tasks
 from .validators import validate_extraction
 
 __all__ = [
     "CandidateNode",
     "DemotedItem",
+    "EvidenceClass",
     "EvidenceSpan",
     "ExtractedClaim",
     "ExtractedEdge",
@@ -35,9 +42,15 @@ __all__ = [
     "ExtractionCaps",
     "ExtractionValidationError",
     "ExtractionValidationReport",
+    "LocalEntityResolutionTask",
+    "MechanismSignature",
     "PaperGraph",
     "PaperExtraction",
+    "ProblemStatement",
+    "ResolutionRelationKind",
     "ValidationSeverity",
+    "build_local_entity_resolution_tasks",
     "select_evidence_spans",
+    "select_model_draft_spans",
     "validate_extraction",
 ]

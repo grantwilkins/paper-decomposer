@@ -63,6 +63,7 @@ def validate_extraction(
     evidence_by_id = {span.span_id: span for span in extraction.evidence_spans}
     node_by_id = {node.local_node_id: node for node in extraction.nodes}
     setting_by_id = {setting.local_setting_id: setting for setting in extraction.settings}
+    problem_by_id = {problem.problem_id: problem for problem in extraction.problems}
     outcome_by_id = {outcome.outcome_id: outcome for outcome in extraction.outcomes}
     section_titles = {_normalize(span.section_title) for span in extraction.evidence_spans}
 
@@ -70,6 +71,19 @@ def validate_extraction(
 
     for node in extraction.nodes:
         errors.extend(_missing_evidence_errors("node", node.local_node_id, node.evidence_span_ids, evidence_by_id))
+        for problem_id in node.problem_ids:
+            if problem_id not in problem_by_id:
+                errors.append(_missing_target_error("node_problem_missing", "node", node.local_node_id, problem_id))
+        if node.kind == "method_category":
+            errors.append(
+                _error(
+                    "method_category_promoted",
+                    "method_category nodes are not allowed in paper-local promoted graphs.",
+                    object_kind="node",
+                    object_id=node.local_node_id,
+                    evidence_span_ids=node.evidence_span_ids,
+                )
+            )
         if node.kind == "method" and not _has_mechanism_sentence(node.mechanism_sentence):
             errors.append(
                 _error(
@@ -99,13 +113,18 @@ def validate_extraction(
                 )
             )
 
+    for problem in extraction.problems:
+        errors.extend(
+            _missing_evidence_errors("problem", problem.problem_id, problem.evidence_span_ids, evidence_by_id)
+        )
+
     for setting in extraction.settings:
         errors.extend(
             _missing_evidence_errors("setting", setting.local_setting_id, setting.evidence_span_ids, evidence_by_id)
         )
         if _is_problem_setting(setting.canonical_name, setting.kind):
             errors.append(
-                _warning(
+                _error(
                     "problem_stored_as_setting",
                     "Problem/challenge context should not be stored as an application, task, or workload setting.",
                     object_kind="setting",
@@ -213,6 +232,16 @@ def validate_extraction(
         for setting_id in outcome.setting_ids:
             if setting_id not in setting_by_id:
                 errors.append(_missing_target_error("outcome_setting_missing", "outcome", outcome.outcome_id, setting_id))
+        if not (outcome.value or outcome.delta):
+            errors.append(
+                _error(
+                    "outcome_measurement_missing",
+                    "Outcome must include metric plus at least one of value or delta.",
+                    object_kind="outcome",
+                    object_id=outcome.outcome_id,
+                    evidence_span_ids=outcome.evidence_span_ids,
+                )
+            )
         errors.extend(_missing_evidence_errors("outcome", outcome.outcome_id, outcome.evidence_span_ids, evidence_by_id))
         errors.extend(
             _numeric_grounding_findings(
@@ -241,20 +270,23 @@ def validate_extraction(
         for setting_id in claim.setting_ids:
             if setting_id not in setting_by_id:
                 errors.append(_missing_target_error("claim_setting_missing", "claim", claim.claim_id, setting_id))
+        for problem_id in claim.problem_ids:
+            if problem_id not in problem_by_id:
+                errors.append(_missing_target_error("claim_problem_missing", "claim", claim.claim_id, problem_id))
         for outcome_id in claim.outcome_ids:
             if outcome_id not in outcome_by_id:
                 errors.append(_missing_target_error("claim_outcome_missing", "claim", claim.claim_id, outcome_id))
         errors.extend(_missing_evidence_errors("claim", claim.claim_id, claim.evidence_span_ids, evidence_by_id))
-        errors.extend(
-            _numeric_grounding_findings(
-                "claim",
-                claim.claim_id,
-                [claim.value, claim.delta],
-                claim.evidence_span_ids,
-                evidence_by_id,
-                require_numeric_grounding=require_numeric_grounding,
+        if _uses_non_claim_evidence(claim.evidence_span_ids, evidence_by_id):
+            errors.append(
+                _error(
+                    "claim_uses_noisy_evidence",
+                    "Claims must not cite component-label, example-text, or formula-fragment evidence.",
+                    object_kind="claim",
+                    object_id=claim.claim_id,
+                    evidence_span_ids=claim.evidence_span_ids,
+                )
             )
-        )
         if not _appears_in_evidence(claim.raw_text, claim.evidence_span_ids, evidence_by_id):
             errors.append(
                 _warning(
@@ -265,23 +297,33 @@ def validate_extraction(
                     evidence_span_ids=claim.evidence_span_ids,
                 )
             )
-        if _claim_needs_structured_fields(claim) and not any(
-            [claim.metric, claim.value, claim.delta, claim.baseline, claim.comparator]
-        ):
+        if _row_like_claim_without_outcome(claim):
             errors.append(
-                _warning(
-                    "claim_structured_fields_missing",
-                    "Comparison claim should expose metric, delta/value, baseline, or comparator fields.",
+                _error(
+                    "row_like_claim_without_outcome",
+                    "Claim text contains row-like measurement content but is not linked to explicit outcome rows.",
                     object_kind="claim",
                     object_id=claim.claim_id,
                     evidence_span_ids=claim.evidence_span_ids,
                 )
             )
-        if _claim_requires_outcome(claim):
+        claim_type_error = _claim_type_contradiction(claim)
+        if claim_type_error is not None:
             errors.append(
-                _warning(
-                    "structured_claim_without_outcome",
-                    "Claim has metric, value/delta, and comparator/baseline but is not linked to an explicit outcome row.",
+                _error(
+                    claim_type_error,
+                    "Claim type contradicts the metric or finding text.",
+                    object_kind="claim",
+                    object_id=claim.claim_id,
+                    evidence_span_ids=claim.evidence_span_ids,
+                )
+            )
+        setting_context_error = _claim_setting_context_error(claim, setting_by_id)
+        if setting_context_error is not None:
+            errors.append(
+                _error(
+                    setting_context_error,
+                    "Claim setting IDs contradict the claim text.",
                     object_kind="claim",
                     object_id=claim.claim_id,
                     evidence_span_ids=claim.evidence_span_ids,
@@ -297,11 +339,11 @@ def validate_extraction(
                     evidence_span_ids=claim.evidence_span_ids,
                 )
             )
-        if not (claim.method_ids or claim.setting_ids or claim.outcome_ids):
+        if not (claim.method_ids or claim.setting_ids or claim.problem_ids or claim.outcome_ids):
             errors.append(
                 _error(
                     "claims_unattached",
-                    "Claim must attach to at least one method-family node, setting, or outcome.",
+                    "Claim must attach to at least one method-family node, problem, setting, or outcome.",
                     object_kind="claim",
                     object_id=claim.claim_id,
                     evidence_span_ids=claim.evidence_span_ids,
@@ -326,6 +368,16 @@ def validate_extraction(
     promoted_names.update(_normalize(setting.canonical_name) for setting in extraction.settings)
     for item in extraction.demoted_items:
         errors.extend(_missing_evidence_errors("demoted_item", item.name, item.evidence_span_ids, evidence_by_id))
+        if _is_baseline_system_demoted(item.name, item.reason_demoted):
+            errors.append(
+                _error(
+                    "baseline_system_demoted",
+                    "Baseline systems must be reference system nodes, not demoted items.",
+                    object_kind="demoted_item",
+                    object_id=item.name,
+                    evidence_span_ids=item.evidence_span_ids,
+                )
+            )
         if _normalize(item.name) in promoted_names:
             errors.append(
                 _error(
@@ -657,21 +709,26 @@ def _looks_like_figure_label_noise(value: str) -> bool:
     return False
 
 
-def _claim_needs_structured_fields(claim: object) -> bool:
-    text = f"{getattr(claim, 'raw_text', '')} {getattr(claim, 'finding', '')}".casefold()
+def _row_like_claim_without_outcome(claim: object) -> bool:
+    if getattr(claim, "outcome_ids", []):
+        return False
+    text = _normalize_identifier(f"{getattr(claim, 'raw_text', '')} {getattr(claim, 'finding', '')}")
     if not _contains_digit(text):
         return False
-    comparison_markers = ("compared", "than", "higher", "lower", "versus", " vs ", "×", "x", "%")
-    return any(marker in text for marker in comparison_markers)
-
-
-def _claim_requires_outcome(claim: object) -> bool:
-    return bool(
-        getattr(claim, "metric", None)
-        and (getattr(claim, "value", None) or getattr(claim, "delta", None))
-        and (getattr(claim, "baseline", None) or getattr(claim, "comparator", None))
-        and not getattr(claim, "outcome_ids", [])
+    row_markers = (
+        "compared",
+        "than",
+        "higher",
+        "lower",
+        "versus",
+        "request rate",
+        "throughput",
+        "latency",
+        "memory saving",
+        "memory waste",
+        "percent",
     )
+    return any(marker in text for marker in row_markers) or bool(re.search(r"\d+(\.\d+)?\s*(x|%)", text))
 
 
 def _overall_system_claim_attached_too_low(claim: object, extraction: PaperExtraction) -> bool:
@@ -686,11 +743,57 @@ def _overall_system_claim_attached_too_low(claim: object, extraction: PaperExtra
     if not any(_name_appears_in_text(system.canonical_name, text) for system in extraction.graph.systems):
         return False
     metric_text = _normalize_identifier(
-        f"{getattr(claim, 'metric', '')} {getattr(claim, 'raw_text', '')} {getattr(claim, 'finding', '')}"
+        f"{getattr(claim, 'raw_text', '')} {getattr(claim, 'finding', '')}"
     )
     if "overhead" in metric_text or "kernel latency" in metric_text:
         return False
     return any(term in metric_text for term in ("request rate", "throughput", "latency", "requests"))
+
+
+def _uses_non_claim_evidence(evidence_span_ids: list[str], evidence_by_id: dict[str, object]) -> bool:
+    noisy_classes = {"component_label", "example_text", "formula_fragment"}
+    return any(str(getattr(evidence_by_id.get(span_id), "evidence_class", "")) in noisy_classes for span_id in evidence_span_ids)
+
+
+def _claim_type_contradiction(claim: object) -> str | None:
+    claim_type = str(getattr(claim, "claim_type", ""))
+    text = _normalize_identifier(f"{getattr(claim, 'raw_text', '')} {getattr(claim, 'finding', '')}")
+    performance_terms = ("throughput", "request rate", "requests per second", "latency improvement")
+    memory_terms = ("memory saving", "memory waste", "memory usage", "memory fragmentation")
+    overhead_terms = ("overhead", "slowdown", "higher latency", "additional latency", "kernel latency")
+    if claim_type == "memory" and any(term in text for term in performance_terms):
+        return "claim_type_metric_contradiction"
+    if claim_type == "performance" and any(term in text for term in memory_terms):
+        return "claim_type_metric_contradiction"
+    if claim_type == "performance" and any(term in text for term in overhead_terms):
+        return "claim_type_overhead_contradiction"
+    return None
+
+
+def _claim_setting_context_error(claim: object, setting_by_id: dict[str, object]) -> str | None:
+    text = _normalize_identifier(f"{getattr(claim, 'raw_text', '')} {getattr(claim, 'finding', '')}")
+    setting_names = {
+        _normalize_identifier(str(getattr(setting_by_id.get(setting_id), "canonical_name", "")))
+        for setting_id in getattr(claim, "setting_ids", [])
+    }
+    if "basic sampling" in text and any("parallel sampling" in name for name in setting_names):
+        return "claim_setting_context_mismatch"
+    if "parallel sampling" in text and any(name == "basic sampling" for name in setting_names):
+        return "claim_setting_context_mismatch"
+    if "sharegpt" in text and any("alpaca" in name for name in setting_names):
+        return "claim_setting_context_mismatch"
+    if "alpaca" in text and any("sharegpt" in name for name in setting_names):
+        return "claim_setting_context_mismatch"
+    return None
+
+
+def _is_baseline_system_demoted(name: str, reason: str) -> bool:
+    normalized = _normalize_identifier(f"{name} {reason}")
+    baseline_markers = ("baseline", "compared", "comparator")
+    known_system_markers = ("orca", "fastertransformer", "faster transformer", "deepspeed", "triton")
+    return any(marker in normalized for marker in baseline_markers) and any(
+        marker in normalized for marker in known_system_markers
+    )
 
 
 def _is_problem_setting(name: str, kind: str) -> bool:

@@ -21,6 +21,7 @@ from .contracts import (
     ExtractionValidationError,
     PaperGraph,
     PaperExtraction,
+    ProblemStatement,
 )
 from .prompts import (
     big_model_compact_prompt,
@@ -86,6 +87,7 @@ class ClaimsOutcomesDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     settings: list[ExtractedSetting] = Field(default_factory=list)
+    problems: list[ProblemStatement] = Field(default_factory=list)
     outcomes: list[ExtractedOutcome] = Field(default_factory=list)
     claims: list[ExtractedClaim] = Field(default_factory=list)
 
@@ -94,6 +96,7 @@ class ExtractionDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     graph: PaperGraph = Field(default_factory=PaperGraph)
+    problems: list[ProblemStatement] = Field(default_factory=list)
     outcomes: list[ExtractedOutcome] = Field(default_factory=list)
     claims: list[ExtractedClaim] = Field(default_factory=list)
     demoted_items: list[DemotedItem] = Field(default_factory=list)

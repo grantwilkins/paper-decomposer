@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from .contracts import ExtractionValidationError, PaperExtraction
@@ -27,6 +29,7 @@ class DBWritePlan(BaseModel):
     outcomes: list[dict[str, object]] = Field(default_factory=list)
     claims: list[dict[str, object]] = Field(default_factory=list)
     local_evidence_links: list[dict[str, object]] = Field(default_factory=list)
+    metadata: dict[str, object] = Field(default_factory=dict)
     warnings: list[ExtractionValidationError] = Field(default_factory=list)
 
 
@@ -42,7 +45,24 @@ def build_db_write_plan(extraction: PaperExtraction) -> DBWritePlan:
     if report.blocking_errors:
         raise ExtractionPersistenceError(report.blocking_errors)
 
-    plan = DBWritePlan(warnings=report.warnings)
+    plan = DBWritePlan(
+        warnings=report.warnings,
+        metadata={
+            "problems": [
+                {
+                    "local_problem_id": problem.problem_id,
+                    "statement": problem.statement,
+                    "description": problem.description,
+                    "confidence": problem.confidence,
+                    "evidence_span_ids": problem.evidence_span_ids,
+                }
+                for problem in extraction.problems
+            ],
+            "evidence_classes": {
+                span.span_id: span.evidence_class for span in extraction.evidence_spans
+            },
+        },
+    )
     plan.evidence_spans = [_evidence_span_row(extraction, span) for span in extraction.evidence_spans]
 
     for node in extraction.nodes:
@@ -59,8 +79,12 @@ def build_db_write_plan(extraction: PaperExtraction) -> DBWritePlan:
                     "category_tags": node.category_tags,
                     "status": node.status,
                     "introduced_by": node.introduced_by,
+                    "problem_ids": node.problem_ids,
                     "granularity_rationale": node.granularity_rationale,
                     "mechanism_sentence": node.mechanism_sentence,
+                    "mechanism_signature": node.mechanism_signature.model_dump(mode="json")
+                    if node.mechanism_signature is not None
+                    else None,
                     "confidence": node.confidence,
                     "evidence_span_ids": node.evidence_span_ids,
                 },
@@ -141,11 +165,13 @@ def build_db_write_plan(extraction: PaperExtraction) -> DBWritePlan:
                 "method_local_node_ids": outcome.method_ids,
                 "setting_local_setting_ids": outcome.setting_ids,
                 "metric_name": outcome.metric,
-                "value": outcome.value,
-                "delta_value": outcome.delta,
+                "value": _numeric_or_none(outcome.value),
+                "delta_value": _numeric_or_none(outcome.delta),
                 "baseline": outcome.baseline,
                 "units": outcome.units,
                 "metadata": {
+                    "raw_value": outcome.value,
+                    "raw_delta": outcome.delta,
                     "comparator": outcome.comparator,
                     "confidence": outcome.confidence,
                     "evidence_span_ids": outcome.evidence_span_ids,
@@ -166,12 +192,8 @@ def build_db_write_plan(extraction: PaperExtraction) -> DBWritePlan:
                     "raw_text": claim.raw_text,
                     "method_ids": claim.method_ids,
                     "setting_ids": claim.setting_ids,
+                    "problem_ids": claim.problem_ids,
                     "outcome_ids": claim.outcome_ids,
-                    "metric": claim.metric,
-                    "value": claim.value,
-                    "delta": claim.delta,
-                    "baseline": claim.baseline,
-                    "comparator": claim.comparator,
                     "evidence_span_ids": claim.evidence_span_ids,
                 },
             }
@@ -194,6 +216,18 @@ def _evidence_span_row(extraction: PaperExtraction, span: object) -> dict[str, o
         "source_kind": getattr(span, "source_kind"),
         "text": getattr(span, "text"),
     }
+
+
+def _numeric_or_none(value: str | None) -> float | None:
+    if value is None:
+        return None
+    cleaned = value.strip().replace(",", "")
+    if not cleaned:
+        return None
+    match = re.fullmatch(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", cleaned)
+    if match is None:
+        return None
+    return float(cleaned)
 
 
 def _evidence_links(span_ids: list[str], target_kind: str, target_id: str) -> list[dict[str, object]]:

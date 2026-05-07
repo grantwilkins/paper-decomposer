@@ -14,7 +14,8 @@ Plausible wrong implementations:
 
 from __future__ import annotations
 
-from paper_decomposer.extraction.evidence import select_evidence_spans
+from paper_decomposer.extraction.contracts import EvidenceSpan
+from paper_decomposer.extraction.evidence import select_evidence_spans, select_model_draft_spans
 from paper_decomposer.schema import EvidenceArtifact, PaperDocument, PaperMetadata, RhetoricalRole, Section
 
 
@@ -116,3 +117,50 @@ def test_isolated_visual_fragments_are_filtered_but_captions_remain() -> None:
     assert "Memory usage (GB)" not in texts
     assert "1.2k" not in texts
     assert "Batch size (# requests)" not in texts
+
+
+def test_evidence_class_controls_big_model_draft_filtering_without_replacing_source_kind() -> None:
+    spans = [
+        EvidenceSpan(
+            span_id="p1",
+            paper_id="paper-1",
+            section_title="Method",
+            section_kind="method",
+            source_kind="paragraph",
+            evidence_class="prose",
+            text="The method maps logical blocks to physical blocks.",
+        ),
+        EvidenceSpan(
+            span_id="c1",
+            paper_id="paper-1",
+            section_title="Figure",
+            section_kind="method",
+            source_kind="paragraph",
+            evidence_class="component_label",
+            text="KV Cache Manager",
+        ),
+        EvidenceSpan(
+            span_id="e1",
+            paper_id="paper-1",
+            section_title="Example",
+            section_kind="method",
+            source_kind="paragraph",
+            evidence_class="example_text",
+            text="Four score and seven",
+        ),
+        EvidenceSpan(
+            span_id="f1",
+            paper_id="paper-1",
+            section_title="Equation",
+            section_kind="method",
+            source_kind="paragraph",
+            evidence_class="formula_fragment",
+            text="y = W x + b",
+        ),
+    ]
+
+    selected = select_model_draft_spans(spans)
+
+    assert [span.span_id for span in selected] == ["p1"]
+    assert spans[1].source_kind == "paragraph"
+    assert spans[1].evidence_class == "component_label"

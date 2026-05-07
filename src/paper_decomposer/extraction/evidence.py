@@ -5,7 +5,7 @@ import re
 
 from paper_decomposer.schema import EvidenceArtifact, PaperDocument, RhetoricalRole, Section
 
-from .contracts import EvidenceSpan, ExtractionValidationError, PaperExtraction, SourceKind
+from .contracts import EvidenceClass, EvidenceSpan, ExtractionValidationError, PaperExtraction, SourceKind
 
 _HIGH_SIGNAL_ROLES = {
     RhetoricalRole.abstract,
@@ -52,6 +52,7 @@ def select_evidence_spans(
                     section_kind=section.role.value,
                     text=text,
                     source_kind=source_kind,
+                    evidence_class=_evidence_class(text, source_kind=source_kind),
                 )
             )
             used_chars += len(text)
@@ -76,11 +77,21 @@ def select_evidence_spans(
                         page_end=artifact.source_page,
                         artifact_id=artifact.artifact_id,
                         source_kind=_artifact_source_kind(artifact),
+                        evidence_class=_evidence_class(
+                            caption_text,
+                            source_kind=_artifact_source_kind(artifact),
+                        ),
                     )
                 )
                 used_chars += len(caption_text)
 
     return spans
+
+
+def select_model_draft_spans(spans: list[EvidenceSpan]) -> list[EvidenceSpan]:
+    """Keep evidence classes suitable for method/claim/outcome drafting."""
+    allowed: set[EvidenceClass] = {"prose", "caption", "table", "frontmatter"}
+    return [span for span in spans if span.evidence_class in allowed]
 
 
 def select_targeted_repair_spans(
@@ -234,6 +245,22 @@ def _section_source_kind(section: Section) -> SourceKind:
     return "paragraph"
 
 
+def _evidence_class(text: str, *, source_kind: SourceKind) -> EvidenceClass:
+    if source_kind in {"abstract", "contribution", "conclusion"}:
+        return "frontmatter"
+    if source_kind == "caption":
+        return "caption"
+    if source_kind == "table_text":
+        return "table"
+    if _looks_like_formula_fragment(text):
+        return "formula_fragment"
+    if _looks_like_component_label(text):
+        return "component_label"
+    if _looks_like_example_text(text):
+        return "example_text"
+    return "prose"
+
+
 def _paragraph_chunks(text: str, *, max_chars: int = 2400) -> Iterable[str]:
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
     if not paragraphs and text.strip():
@@ -297,4 +324,48 @@ def _is_isolated_visual_fragment(text: str) -> bool:
     return False
 
 
-__all__ = ["select_evidence_spans", "select_targeted_repair_spans"]
+def _looks_like_component_label(text: str) -> bool:
+    cleaned = " ".join(text.strip().split())
+    if not cleaned:
+        return False
+    if re.search(r"[.!?]\s*$", cleaned):
+        return False
+    words = re.findall(r"[A-Za-z0-9]+", cleaned)
+    if len(words) > 6:
+        return False
+    component_markers = (
+        "scheduler",
+        "manager",
+        "engine",
+        "worker",
+        "frontend",
+        "backend",
+        "shard",
+        "cache",
+        "api",
+        "kernel",
+    )
+    normalized = cleaned.casefold()
+    return any(marker in normalized for marker in component_markers)
+
+
+def _looks_like_example_text(text: str) -> bool:
+    cleaned = " ".join(text.strip().split())
+    normalized = cleaned.casefold()
+    if "four score and seven" in normalized or "brought forth" in normalized:
+        return True
+    if re.match(r"^(example|prompt|response|input|output)\s*[:：]", cleaned, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _looks_like_formula_fragment(text: str) -> bool:
+    cleaned = " ".join(text.strip().split())
+    if len(cleaned) > 160:
+        return False
+    has_formula_operator = bool(re.search(r"[=∑∏≤≥≈±√→←↔]", cleaned))
+    has_latex_marker = "\\" in cleaned or "$" in cleaned
+    return has_formula_operator and (has_latex_marker or len(re.findall(r"[A-Za-z]", cleaned)) <= 12)
+
+
+__all__ = ["select_evidence_spans", "select_model_draft_spans", "select_targeted_repair_spans"]

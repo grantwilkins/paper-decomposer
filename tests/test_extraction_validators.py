@@ -13,6 +13,8 @@ Plausible wrong implementations:
 - Normalize or invent numeric evidence instead of checking cited text.
 - Promote paper section headings as method nodes.
 - Miss DB-write quality warnings for system-level claims, coarse settings, topology, status, and outcomes.
+- Accept row-like claims instead of requiring explicit outcome rows.
+- Accept problem/challenge settings instead of top-level problems.
 """
 
 from __future__ import annotations
@@ -313,7 +315,7 @@ def test_final_extraction_serializes_graph_without_candidates() -> None:
     assert [node["canonical_name"] for node in payload["graph"]["methods"]] == ["PagedAttention"]
 
 
-def test_validator_warns_for_understructured_comparison_claim_and_zero_confidence() -> None:
+def test_validator_blocks_row_like_claim_without_outcome_and_warns_for_zero_confidence() -> None:
     extraction = _valid_extraction()
     extraction.evidence_spans[0].text = "vLLM can sustain 2x higher request rates than Orca."
     extraction.claims[0].raw_text = "vLLM can sustain 2x higher request rates than Orca."
@@ -322,14 +324,14 @@ def test_validator_warns_for_understructured_comparison_claim_and_zero_confidenc
 
     report = validate_extraction(extraction)
 
+    blocking_codes = {error.code for error in report.blocking_errors}
     warning_codes = {warning.code for warning in report.warnings}
-    assert "claim_structured_fields_missing" in warning_codes
+    assert "row_like_claim_without_outcome" in blocking_codes
     assert "zero_confidence_default" in warning_codes
 
 
-def test_validator_warns_when_numeric_value_is_not_in_cited_evidence() -> None:
-    extraction = _valid_extraction()
-    extraction.claims.append(
+def test_claim_contract_rejects_row_fields() -> None:
+    try:
         ExtractedClaim(
             claim_id="c1",
             paper_id="paper-1",
@@ -340,7 +342,25 @@ def test_validator_warns_when_numeric_value_is_not_in_cited_evidence() -> None:
             method_ids=["m1"],
             evidence_span_ids=["s1"],
         )
+    except ValidationError as exc:
+        assert "value" in str(exc)
+    else:
+        raise AssertionError("claims must reject row-level measurement fields")
+
+
+def test_validator_warns_when_outcome_numeric_value_is_not_in_cited_evidence() -> None:
+    extraction = _valid_extraction()
+    extraction.outcomes.append(
+        ExtractedOutcome(
+            outcome_id="o1",
+            paper_id="paper-1",
+            metric="throughput",
+            method_ids=["m1"],
+            delta="2-4x",
+            evidence_span_ids=["s1"],
+        )
     )
+    extraction.claims[0].outcome_ids = ["o1"]
 
     report = validate_extraction(extraction)
 
@@ -415,20 +435,30 @@ def test_validator_warns_for_graph_quality_issues_before_db_write() -> None:
         finding="vLLM can sustain 2x higher request rates than Orca.",
         method_ids=["m1"],
         setting_ids=["bucket"],
-        metric="request rate",
-        delta="2x",
-        comparator="Orca",
+        outcome_ids=["o1"],
         evidence_span_ids=["s3"],
+    )
+    extraction.outcomes.append(
+        ExtractedOutcome(
+            outcome_id="o1",
+            paper_id="paper-1",
+            metric="request rate",
+            method_ids=["m1"],
+            setting_ids=["bucket"],
+            delta="2x",
+            comparator="Orca",
+            evidence_span_ids=["s3"],
+        )
     )
     extraction.nodes[1].status = "uncertain"
     extraction.nodes[1].evidence_span_ids = ["s2"]
 
     report = validate_extraction(extraction)
 
+    blocking_codes = {error.code for error in report.blocking_errors}
     warning_codes = {warning.code for warning in report.warnings}
-    assert "problem_stored_as_setting" in warning_codes
+    assert "problem_stored_as_setting" in blocking_codes
     assert "scenario_bucket_setting" in warning_codes
-    assert "structured_claim_without_outcome" in warning_codes
     assert "system_claim_attached_to_method_only" in warning_codes
     assert "preemption_topology_suspicious" in warning_codes
     assert "demoted_items_empty_for_component_heavy_paper" in warning_codes
@@ -468,6 +498,7 @@ def test_validator_blocks_nonexistent_claim_outcome_setting_edge_and_method_sett
             paper_id="paper-1",
             metric="throughput",
             method_ids=["missing"],
+            delta="2x",
             evidence_span_ids=["s1"],
         )
     )
@@ -500,6 +531,7 @@ def test_validator_blocks_claim_and_outcome_from_wrong_paper() -> None:
             paper_id="other-paper",
             metric="throughput",
             method_ids=["m1"],
+            delta="2x",
             evidence_span_ids=["s1"],
         )
     )

@@ -20,9 +20,11 @@ from paper_decomposer.extraction.contracts import (
     ExtractedEdge,
     ExtractedMethodSettingLink,
     ExtractedNode,
+    ExtractedOutcome,
     ExtractedSetting,
     ExtractedSettingEdge,
     PaperExtraction,
+    ProblemStatement,
 )
 from paper_decomposer.extraction.db_write_plan import ExtractionPersistenceError, build_db_write_plan
 
@@ -38,7 +40,15 @@ def _extraction() -> PaperExtraction:
                 paper_id="paper-1",
                 section_title="Design",
                 section_kind="method",
+                evidence_class="prose",
                 text="PagedAttention maps logical KV cache blocks to physical blocks on demand for LLaMA-13B.",
+            )
+        ],
+        problems=[
+            ProblemStatement(
+                problem_id="local:problem:kv_fragmentation",
+                statement="Contiguous KV-cache allocation wastes memory.",
+                evidence_span_ids=["s1"],
             )
         ],
         nodes=[
@@ -97,6 +107,17 @@ def _extraction() -> PaperExtraction:
                 evidence_span_ids=["s1"],
             )
         ],
+        outcomes=[
+            ExtractedOutcome(
+                outcome_id="o1",
+                paper_id="paper-1",
+                metric="throughput",
+                method_ids=["m1"],
+                setting_ids=["model-1"],
+                delta="2x",
+                evidence_span_ids=["s1"],
+            )
+        ],
         claims=[
             ExtractedClaim(
                 claim_id="claim-1",
@@ -106,6 +127,8 @@ def _extraction() -> PaperExtraction:
                 finding="PagedAttention maps logical KV cache blocks to physical blocks on demand.",
                 method_ids=["m1"],
                 setting_ids=["model-1"],
+                problem_ids=["local:problem:kv_fragmentation"],
+                outcome_ids=["o1"],
                 evidence_span_ids=["s1"],
             )
         ],
@@ -135,6 +158,12 @@ def test_write_plan_preserves_local_ids_and_evidence() -> None:
         link["target_kind"] == "setting" and link["local_target_id"] == "model-1"
         for link in plan.local_evidence_links
     )
+    assert plan.evidence_spans[0].keys() >= {"source_kind", "text"}
+    assert "evidence_class" not in plan.evidence_spans[0]
+    assert plan.metadata["evidence_classes"] == {"s1": "prose"}
+    assert plan.metadata["problems"][0]["local_problem_id"] == "local:problem:kv_fragmentation"
+    assert plan.outcomes[0]["delta_value"] is None
+    assert plan.outcomes[0]["metadata"]["raw_delta"] == "2x"
 
 
 def test_write_plan_keeps_applicability_out_of_method_edges() -> None:

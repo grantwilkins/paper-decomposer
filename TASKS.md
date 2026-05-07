@@ -25,6 +25,7 @@ Claims may be extracted only after graph nodes exist. If claims exist but no gra
 - CLI extraction dry run is implemented with `--extract --output-json`.
 - A local-ID DB write plan is implemented.
 - The schema has extraction runs, evidence spans, evidence links, setting edges, method-setting links, model artifacts, and metrics.
+- Experimental extraction now treats discovery as open-world and paper-local, with top-level problems, evidence classes, proposition-only claims, outcome rows, and local entity resolution tasks for later global matching.
 
 ## Remaining Persistence Work
 
@@ -42,6 +43,8 @@ Claims may be extracted only after graph nodes exist. If claims exist but no gra
 - Preserve raw numeric text in outcome metadata when schema numeric fields cannot represent ranges or units cleanly.
 - Persist claims and resolve claim links to methods, settings, and outcomes.
 - Decide whether `claim_evidence` remains a compatibility table or whether generic `evidence_links` fully replaces it.
+- Decide how live DB persistence should store top-level paper-local problems before global problem resolution exists.
+- Decide whether `evidence_class` becomes a first-class DB column or remains write-plan metadata.
 
 ## Remaining Extraction Work
 
@@ -54,6 +57,8 @@ Claims may be extracted only after graph nodes exist. If claims exist but no gra
 - Decide whether `require_numeric_grounding` should block extraction by default or only in DB-write mode.
 - Add optional preflight for only the model tiers used in the current run.
 - Keep visual figure extraction out of scope unless a future explicit feature adds it.
+- Replace remaining vLLM-specific deterministic cleanup rules with field-general graph compression once multi-paper fixtures are available.
+- Implement the global resolver pass that consumes local entity resolution tasks and assigns same_as/variant_of/distinct/uncertain decisions without mutating paper-local extraction records.
 
 ## Remaining CLI Work
 
