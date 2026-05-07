@@ -28,6 +28,7 @@ def validate_extraction(
     extraction: PaperExtraction,
     *,
     caps: ExtractionCaps | None = None,
+    require_numeric_grounding: bool = False,
 ) -> ExtractionValidationReport:
     caps = caps or ExtractionCaps()
     errors: list[ExtractionValidationError] = []
@@ -123,7 +124,16 @@ def validate_extraction(
             if setting_id not in setting_by_id:
                 errors.append(_missing_target_error("outcome_setting_missing", "outcome", outcome.outcome_id, setting_id))
         errors.extend(_missing_evidence_errors("outcome", outcome.outcome_id, outcome.evidence_span_ids, evidence_by_id))
-        errors.extend(_numeric_grounding_warnings("outcome", outcome.outcome_id, [outcome.value, outcome.delta], outcome.evidence_span_ids, evidence_by_id))
+        errors.extend(
+            _numeric_grounding_findings(
+                "outcome",
+                outcome.outcome_id,
+                [outcome.value, outcome.delta],
+                outcome.evidence_span_ids,
+                evidence_by_id,
+                require_numeric_grounding=require_numeric_grounding,
+            )
+        )
 
     for claim in extraction.claims:
         if claim.paper_id != extraction.paper_id:
@@ -145,7 +155,16 @@ def validate_extraction(
             if outcome_id not in outcome_by_id:
                 errors.append(_missing_target_error("claim_outcome_missing", "claim", claim.claim_id, outcome_id))
         errors.extend(_missing_evidence_errors("claim", claim.claim_id, claim.evidence_span_ids, evidence_by_id))
-        errors.extend(_numeric_grounding_warnings("claim", claim.claim_id, [claim.value, claim.delta], claim.evidence_span_ids, evidence_by_id))
+        errors.extend(
+            _numeric_grounding_findings(
+                "claim",
+                claim.claim_id,
+                [claim.value, claim.delta],
+                claim.evidence_span_ids,
+                evidence_by_id,
+                require_numeric_grounding=require_numeric_grounding,
+            )
+        )
         if not _appears_in_evidence(claim.raw_text, claim.evidence_span_ids, evidence_by_id):
             errors.append(
                 _warning(
@@ -206,14 +225,16 @@ def _missing_evidence_errors(
     return errors
 
 
-def _numeric_grounding_warnings(
+def _numeric_grounding_findings(
     object_kind: str,
     object_id: str,
     values: list[str | None],
     evidence_span_ids: list[str],
     evidence_by_id: dict[str, object],
+    *,
+    require_numeric_grounding: bool,
 ) -> list[ExtractionValidationError]:
-    warnings: list[ExtractionValidationError] = []
+    findings: list[ExtractionValidationError] = []
     for value in values:
         if not value:
             continue
@@ -221,8 +242,9 @@ def _numeric_grounding_warnings(
             continue
         if _appears_in_evidence(value, evidence_span_ids, evidence_by_id):
             continue
-        warnings.append(
-            _warning(
+        builder = _error if require_numeric_grounding else _warning
+        findings.append(
+            builder(
                 "numeric_grounding_unverified",
                 "Numeric value does not appear exactly in cited evidence.",
                 object_kind=object_kind,
@@ -230,7 +252,7 @@ def _numeric_grounding_warnings(
                 evidence_span_ids=evidence_span_ids,
             )
         )
-    return warnings
+    return findings
 
 
 def _cap_warnings(extraction: PaperExtraction, caps: ExtractionCaps) -> list[ExtractionValidationError]:

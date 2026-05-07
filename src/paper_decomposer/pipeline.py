@@ -33,6 +33,10 @@ async def extract_paper(pdf_path: str, config_path: str = "config.yaml") -> Pape
 
 async def extract_document(document: PaperDocument, *, config: Any) -> PaperExtraction:
     extraction_config = _extraction_config(config)
+    if extraction_config.get("enabled") is False:
+        raise ValueError("Extraction is disabled by pipeline.extraction.enabled.")
+    if extraction_config.get("enable_visual_figure_extraction") is True:
+        raise ValueError("Visual figure extraction is not implemented; use captions and parser-extracted text.")
     if int(extraction_config.get("max_model_calls_per_paper", 5)) < 4:
         raise ValueError("Extraction requires at least 4 model calls per paper.")
 
@@ -57,14 +61,15 @@ async def extract_document(document: PaperDocument, *, config: Any) -> PaperExtr
         extraction_run_id=extraction_run_id,
         title=document.metadata.title,
         evidence_spans=spans,
-        sketch=sketch,
-        graph=graph,
-        claims=claims,
         final=final,
     )
 
     caps = _extraction_caps(extraction_config)
-    report = validate_extraction(extraction, caps=caps)
+    report = validate_extraction(
+        extraction,
+        caps=caps,
+        require_numeric_grounding=bool(extraction_config.get("require_numeric_grounding", False)),
+    )
     if report.blocking_errors:
         codes = ", ".join(error.code for error in report.blocking_errors)
         raise ValueError(f"Extraction failed deterministic validation: {codes}")

@@ -1,6 +1,6 @@
 # Architecture Overview
 
-The extraction stage should turn a parsed paper into a paper-local method and evidence graph before any global merge or deduplication work happens.
+The extraction stage turns a parsed paper into a paper-local method and evidence graph before any global merge or deduplication work happens.
 
 ```text
 ParsedPaper
@@ -9,18 +9,18 @@ ParsedPaper
   -> Paper-local extraction JSON
   -> Deterministic validation
   -> Optional repair/adjudication
-  -> DB mapping
-  -> Postgres DAG records
+  -> Local-ID DB write plan
+  -> Future live DB writer
 ```
 
 The design has two layers:
 
-- Paper-local extraction graph: the first implementation target. It should preserve the paper's reusable methods, settings, explicit outcomes, claims, and source evidence.
+- Paper-local extraction graph: implemented first. It preserves the paper's reusable methods, settings, explicit outcomes, claims, and source evidence.
 - Global canonical method graph: future work. It should merge equivalent concepts across papers after the paper-local extractor is stable.
 
 The database should support reusable method and evidence retrieval, not paper summaries. Research agents should be able to ask what methods exist, what evidence supports a method, where a method was evaluated, what claims are attached to it, and which papers introduced, used, compared against, or improved on it.
 
-# Proposed Package Layout
+# Current Package Layout
 
 ```text
 src/paper_decomposer/extraction/
@@ -31,16 +31,16 @@ src/paper_decomposer/extraction/
   stages.py
   validators.py
   assembler.py
-  db_writer.py
+  db_write_plan.py
 ```
 
 - `contracts.py`: Pydantic models for evidence spans, method-family nodes, settings, outcomes, claims, demoted items, extraction envelopes, validation severity, and validation errors.
 - `evidence.py`: section selection, artifact inclusion, evidence span chunking, and provenance preservation.
 - `prompts.py`: short schema-bound prompt builders and extraction rules.
-- `stages.py`: budget-aware calls into `call_model` for sketching, method extraction, claim extraction, compression, and repair.
+- `stages.py`: budget-aware calls into `call_model` for sketching, method extraction, claim extraction, and compression.
 - `validators.py`: deterministic validation of graph shape, evidence grounding, node granularity, numeric grounding, and schema integrity.
 - `assembler.py`: merge stage outputs into one paper-local extraction JSON document.
-- `db_writer.py`: translate validated paper-local records into the existing database schema.
+- `db_write_plan.py`: translate validated paper-local records into an unresolved local-ID write plan for the live DB writer.
 - `src/paper_decomposer/pipeline.py`: extraction orchestration after `parse_pdf` and before optional DB persistence.
 
 # Data Contracts
@@ -79,11 +79,19 @@ Create method nodes only for reusable mechanisms that pass the method-node test:
 
 - `parent_id`: local parent node identifier.
 - `child_id`: local child node identifier.
-- `relation_kind`: `uses`, `applies_to`, or `is_a` in paper-local JSON.
+- `relation_kind`: `uses`, `is_a`, or `refines` in paper-local JSON.
 - `evidence_span_ids`: cited evidence spans.
 - `confidence`: extraction confidence.
 
-The current database allows `is_a`, `specializes`, `composes`, and `refines` for method and setting edges. Method-family relationships should use `uses`, `is_a`, or `refines`. Cross-family applicability should use `applies_to` and should not be written to `method_edges`.
+The current database allows `is_a`, `specializes`, `composes`, and `refines` for method and setting edges. Method-family relationships use `uses`, `is_a`, or `refines`. Cross-family applicability uses `ExtractedMethodSettingLink` and must not be written to `method_edges`.
+
+## ExtractedMethodSettingLink
+
+- `method_id`: local method-family node identifier.
+- `setting_id`: local setting identifier.
+- `relation_kind`: `applies_to` or `evaluated_on`.
+- `evidence_span_ids`: cited evidence spans.
+- `confidence`: extraction confidence.
 
 ## ExtractedSetting
 
@@ -95,7 +103,7 @@ The current database allows `is_a`, `specializes`, `composes`, and `refines` for
 - `evidence_span_ids`: cited evidence spans.
 - `confidence`: extraction confidence.
 
-The current `settings.kind` enum supports `dataset`, `task`, `application`, `workload`, and `hardware`. The DB writer should not leave model artifacts ambiguous. Prefer adding `model_artifact` or `model` to the enum before persistence so outcomes can be retrieved by model-conditioned settings.
+The current `settings.kind` enum supports `dataset`, `task`, `application`, `workload`, `hardware`, `model_artifact`, and `metric`.
 
 ## ExtractedOutcome
 
@@ -154,11 +162,11 @@ Demoted items preserve useful implementation details, scenarios, and components 
 - `object_id`: local object identifier when known.
 - `evidence_span_ids`: related evidence spans when relevant.
 
-Blocking errors should prevent DB writes. Warnings should be reported and may become errors through configuration.
+Blocking errors prevent DB writes. Warnings are reported and may become errors through configuration.
 
 # LLM Stage Design
 
-The implementation should describe logical extractors but run only 3-5 actual model calls for a normal paper.
+The implementation describes logical extractors but runs only four actual model calls for a normal paper.
 
 ## Frontmatter and Contribution Sketch
 
@@ -244,7 +252,7 @@ Run only when deterministic validation fails.
 
 # Prompting Strategy
 
-Prompts should be short, explicit, and schema-bound.
+Prompts are short, explicit, and schema-bound.
 
 Hard rules:
 
@@ -275,7 +283,7 @@ Avoid separate method nodes for every scenario. For example, prefer a method nod
 
 # Validation Strategy
 
-Deterministic validators should run before any DB write and before escalation to a stronger model.
+Deterministic validators run before any DB write and before escalation to a stronger model.
 
 Checks:
 
@@ -308,31 +316,31 @@ Warnings:
 - Numeric grounding cannot be verified because table text formatting changed.
 - Claim attachment is valid but broad.
 
-# DB Mapping
+# DB Write Plan
 
-The first implementation should map validated paper-local extraction output into the existing schema without assuming a global canonicalization system.
+The implemented write-plan layer maps validated paper-local extraction output into local-ID rows without assuming a global canonicalization system. The live DB writer still needs to resolve local IDs to database UUIDs before inserting `evidence_links`, `claim_links`, outcomes, and graph edges.
 
 - `system` and `method` nodes map to `methods`.
-- Method aliases map to `method_aliases`.
+- Method aliases are currently preserved in method metadata; live persistence should also write them to `method_aliases`.
 - Paper-local `uses` relationships map to `method_edges.composes`.
 - Paper-local `is_a` relationships map to `method_edges.is_a`.
 - Paper-local `refines` relationships map to `method_edges.refines`.
 - Paper-local `applies_to` relationships do not map to `method_edges`.
 - Method-setting applicability maps to `method_setting_links`.
 - `application`, `task`, `dataset`, `workload`, `hardware`, `model_artifact`, and `metric` map to `settings`.
-- Setting relationships map to `setting_edges` after translating paper-local relations into schema-supported relations.
-- Explicit normalized metric rows map to `outcomes`.
-- Typed claims map to `claims`.
-- Claim relationships map to `claim_links`.
-- Claim provenance maps to `claim_evidence`.
+- Setting relationships need a dedicated extraction contract before they can map to `setting_edges`.
+- Explicit metric rows map to local outcome plan rows; live persistence must decide how to expand multi-method and multi-setting outcomes into schema rows.
+- Typed claims map to local claim plan rows.
+- Claim relationships are currently preserved as local IDs in claim metadata; live persistence should resolve them into `claim_links`.
+- Claim provenance is currently represented through generic local evidence links; live persistence should decide whether to also populate `claim_evidence`.
 
 The schema includes `extraction_runs`, `evidence_spans`, `evidence_links`, and metadata JSON columns on methods, method edges, settings, setting edges, method-setting links, outcomes, and claims. Do not validate evidence and then discard method, setting, or edge provenance.
 
 ## Paper-local versus Global IDs
 
-The first extraction PR writes paper-local graph objects. A `canonical_name` is canonical only within a paper extraction run. It must not be used for cross-paper deduplication. Global entity resolution is future work.
+The extraction stage writes paper-local graph objects. A `canonical_name` is canonical only within a paper extraction run. It must not be used for cross-paper deduplication. Global entity resolution is future work.
 
-Each persisted extraction object should preserve:
+Each persisted extraction object must preserve:
 
 - `paper_id`.
 - `extraction_run_id`.
@@ -365,7 +373,7 @@ extraction:
   max_model_calls_per_paper: 5
   max_input_chars_per_stage: 50000
   default_model_tier: cheap
-  adjudication_model_tier: medium
+  adjudication_model_tier: cheap
   enable_visual_figure_extraction: false
   include_captions: true
   include_table_text: true
@@ -379,7 +387,7 @@ extraction:
     max_demoted_items: 40
 ```
 
-If the repository continues to use `small`, `medium`, and `heavy` as model tier names, map `cheap` to the configured `small` tier or rename the suggested key before implementation.
+The runtime model tiers are `small`, `medium`, and `heavy`; extraction maps configured `cheap` to `small`.
 
 # Figure and Table Policy
 
@@ -430,20 +438,18 @@ Useful granularity examples:
 - `Block-wise KV cache address translation` is a valid method.
 - `Fused block copy kernel` is usually an implementation detail unless the paper presents it as a reusable mechanism with clear inputs, outputs, and operative move.
 
-# Testing Strategy
+# Current Testing Strategy
 
-The tests should be small, behavior-named, and grounded in concrete extraction responsibilities.
+The tests are small, behavior-named, and grounded in concrete extraction responsibilities.
 
-- Contract serialization tests for evidence spans, nodes, edges, settings, outcomes, claims, demoted items, and top-level extraction JSON.
-- Prompt output parsing tests for valid JSON, wrapped JSON, malformed JSON repair, and schema rejection.
-- Validator tests for missing edge endpoints, missing evidence spans, missing mechanism sentences, missing granularity rationales, suspicious node counts, paper-outline nodes, generic category nodes, numeric grounding failures, and demoted item promotion.
-- Mocked stage tests for frontmatter sketching, method DAG extraction, claim extraction, compression, repair, and demotion auditing.
-- DB mapping tests for method rows, method aliases, method edges, setting rows, setting edges, outcome rows, claim rows, claim links, and claim evidence.
-- CLI dry-run extraction tests that require no database and no live API.
-- `@pytest.mark.api` integration test with a tiny selected-section fixture.
-- ORCA-like and vLLM-like smoke tests that check graph shape rather than exact exhaustive output.
+- Evidence selection tests cover stable span IDs, section filtering, captions, table policy, and non-fabricated section pages.
+- Validator tests cover missing edge endpoints, missing evidence spans, missing mechanism sentences, missing targets, paper mismatches, numeric grounding, and demoted item promotion.
+- Write-plan tests cover local IDs, evidence preservation, method-setting applicability, and blocking validation failures.
+- Stage tests cover `cheap` to `small` tier mapping and evidence-span grounding in prompts.
+- CLI extraction tests cover JSON output without a live database.
+- Schema tests cover extraction runs, evidence spans, evidence links, method-setting links, model artifacts, and metrics.
 
-Smoke expectations:
+Remaining smoke expectations for future API or fixture tests:
 
 - The graph is not a paper outline.
 - The graph has a system node.
@@ -452,18 +458,12 @@ Smoke expectations:
 - Demoted implementation details are preserved.
 - Visual figure extraction is not required.
 
-# Definition of Done
+# Remaining Definition of Done
 
-The extraction-stage planning docs are complete when a future coding agent can answer:
+The extraction path is complete when a future coding agent can answer:
 
-- What code needs to be added?
-- What are the data contracts?
-- How many LLM calls should a paper usually need?
-- Which model tiers should be used?
-- How are claims grounded?
-- How are method nodes distinguished from settings, scenarios, and components?
-- How does extracted JSON map to the existing Postgres schema?
-- What is explicitly out of scope?
-- How will this be tested without spending much money?
-
-The implementation that follows these docs should produce a cheap, staged, mostly text-grounded extractor using 3-5 model calls for normal papers plus deterministic validators.
+- How does the live DB writer resolve every local extraction ID to a database UUID?
+- How are multi-method and multi-setting outcomes persisted?
+- Are claim links and evidence links written as first-class rows?
+- Which validation warnings block DB-write mode?
+- Which API or fixture smoke tests prove the graph shape is acceptable without spending much money?

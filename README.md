@@ -2,7 +2,7 @@
 
 A pipeline that ingests ML / systems research papers (PDFs) into a Postgres-backed **methods / settings / outcomes / claims DAG**, designed to scale to hundreds of thousands of papers across the field.
 
-This repository is in the middle of a reset. PDF parsing, the LLM client, runtime configuration, and the first paper-local extraction stage are in place. The remaining DB work is the transaction layer that persists validated extraction JSON through the schema in [src/paper_decomposer/db/schema.sql](src/paper_decomposer/db/schema.sql).
+This repository is in the middle of a reset. PDF parsing, the LLM client, runtime configuration, staged paper-local extraction, deterministic validation, CLI extraction dry runs, and local-ID DB write planning are in place. The remaining DB work is the transaction layer that resolves local IDs to database UUIDs and persists validated extraction output through [src/paper_decomposer/db/schema.sql](src/paper_decomposer/db/schema.sql).
 
 ---
 
@@ -15,7 +15,7 @@ This repository is in the middle of a reset. PDF parsing, the LLM client, runtim
 | [paper_decomposer/](paper_decomposer/) | Thin shim package at repo root so `python -m paper_decomposer …` works without an editable install. |
 | [tests/](tests/) | Unit tests + `@pytest.mark.api` integration tests that hit Together. |
 | [fixtures/](fixtures/) | Real paper PDFs used by parser tests. |
-| [config.yaml](config.yaml) | Sole runtime configuration file: API + model tiers + PDF parser + database. |
+| [config.yaml](config.yaml) | Sole runtime configuration file: API + model tiers + PDF parser + extraction + database. |
 | [pyproject.toml](pyproject.toml) | Dependencies and pytest config. Sets `pythonpath = ["src"]`. |
 
 ---

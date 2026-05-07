@@ -1,99 +1,11 @@
 from __future__ import annotations
 
 from enum import Enum
-import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 ModelTier = Literal["small", "medium", "heavy"]
-
-_NONE_LIKE_TEXT = {
-    "",
-    "n/a",
-    "na",
-    "none",
-    "null",
-    "nil",
-    "unspecified",
-    "unknown",
-    "not specified",
-    "not stated",
-}
-
-
-def _clean_text(value: str) -> str:
-    return " ".join(value.strip().split())
-
-
-def _coerce_string(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return _clean_text(value)
-    if isinstance(value, (int, float, bool)):
-        return _clean_text(str(value))
-    if isinstance(value, dict):
-        preferred_keys = (
-            "text",
-            "statement",
-            "reason",
-            "why",
-            "because",
-            "artifact_id",
-            "id",
-            "label",
-            "name",
-            "value",
-        )
-        for key in preferred_keys:
-            nested = value.get(key)
-            if nested is None:
-                continue
-            nested_text = _coerce_string(nested)
-            if nested_text:
-                return nested_text
-        nested_parts = [_coerce_string(item) for item in value.values()]
-        return _clean_text(" ".join(part for part in nested_parts if part))
-    if isinstance(value, (list, tuple, set)):
-        nested_parts = [_coerce_string(item) for item in value]
-        return _clean_text(" ".join(part for part in nested_parts if part))
-    return _clean_text(str(value))
-
-
-def _coerce_optional_string(value: Any) -> str | None:
-    cleaned = _coerce_string(value)
-    if cleaned.lower() in _NONE_LIKE_TEXT:
-        return None
-    return cleaned or None
-
-
-def _coerce_string_list(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        parts = [part for part in re.split(r"[,\n;]+", value) if part.strip()]
-    elif isinstance(value, (list, tuple, set)):
-        parts = [_coerce_string(item) for item in value]
-    elif isinstance(value, dict):
-        parts = [_coerce_string(value)]
-    else:
-        parts = [_coerce_string(value)]
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for part in parts:
-        cleaned = _clean_text(part)
-        if not cleaned:
-            continue
-        lowered = cleaned.lower()
-        if lowered in _NONE_LIKE_TEXT:
-            continue
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        normalized.append(cleaned)
-    return normalized
 
 
 class ApiConfig(BaseModel):
@@ -252,8 +164,4 @@ __all__ = [
     "RuntimeModelConfig",
     "RuntimePipelineConfig",
     "Section",
-    "_clean_text",
-    "_coerce_optional_string",
-    "_coerce_string",
-    "_coerce_string_list",
 ]

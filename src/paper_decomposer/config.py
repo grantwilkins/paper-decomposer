@@ -36,9 +36,9 @@ def load_config(config_path: str | Path | None = None) -> AppSettings:
     except ValidationError as exc:
         raise ConfigError(f"Invalid config data in {path}: {exc}") from exc
 
-    api_key = os.getenv("TOGETHER_API_KEY")
+    api_key = os.getenv(parsed.api.env_key_var)
     if not api_key:
-        raise ConfigError("Missing Together API key. Set TOGETHER_API_KEY in your environment.")
+        raise ConfigError(f"Missing Together API key. Set {parsed.api.env_key_var} in your environment.")
 
     model_tiers = {
         "small": RuntimeModelConfig(

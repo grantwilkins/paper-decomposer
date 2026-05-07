@@ -19,7 +19,7 @@ works from the repo root **without** needing an editable install (`uv pip instal
 
 1. Python imports `paper_decomposer` and runs this `__init__.py`.
 2. `__init__.py` computes `<this-dir>/../src/paper_decomposer` and appends it to `__path__` if it exists.
-3. Any subsequent `import paper_decomposer.X` is resolved by scanning `__path__` in order: this directory first, then the `src` directory. Since only `__init__.py` and `__main__.py` live here, every other submodule (`cli`, `config`, `schema`, `models`, `pdf_parser`, `pipeline`, `prompts.*`) is served from `src/paper_decomposer/`.
+3. Any subsequent `import paper_decomposer.X` is resolved by scanning `__path__` in order: this directory first, then the `src` directory. Since only `__init__.py` and `__main__.py` live here, every other submodule (`cli`, `config`, `schema`, `models`, `pdf_parser`, `pipeline`, `extraction.*`) is served from `src/paper_decomposer/`.
 
 ## When **not** to edit this directory
 

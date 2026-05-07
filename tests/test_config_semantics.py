@@ -105,6 +105,20 @@ def test_load_config_preserves_pdf_pipeline_settings(
     assert settings.pipeline.max_section_chars == 6543
 
 
+def test_load_config_uses_configured_api_key_environment_variable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
+    monkeypatch.setenv("CUSTOM_TOGETHER_KEY", "custom-key")
+    raw = _valid_config_dict()
+    raw["api"]["env_key_var"] = "CUSTOM_TOGETHER_KEY"
+    config_path = _write_yaml(tmp_path, raw)
+
+    settings = load_config(config_path)
+
+    assert settings.api_key == "custom-key"
+
+
 def test_load_config_rejects_non_mapping_yaml(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

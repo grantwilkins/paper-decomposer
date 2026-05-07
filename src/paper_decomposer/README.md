@@ -16,7 +16,7 @@ The implementation of the paper-decomposer pipeline. PDF in -> parsed `PaperDocu
 | [`pipeline.py`](pipeline.py) | `ingest_paper(pdf_path, config_path)` parses only. `extract_paper(pdf_path, config_path)` parses, selects evidence spans, runs staged extraction, and validates paper-local JSON. |
 | [`extraction/`](extraction/) | Paper-local extraction contracts, evidence selection, prompts, staged LLM calls, validators, assembler, and DB write-plan mapping. |
 | [`db/schema.sql`](db/schema.sql) | Postgres DDL: papers, extraction runs, evidence spans/links, methods (DAG), settings (DAG), method-setting links, outcomes, claims. Requires `pgcrypto`, `pg_trgm`, `vector`. |
-| [`db/client.py`](db/client.py) | `PaperDecomposerDB` — async psycopg connection pool. `apply_schema()` is implemented; transaction helper signatures define the live DB writer contract. |
+| [`db/client.py`](db/client.py) | `PaperDecomposerDB` — async psycopg connection pool. `apply_schema()` is implemented; row-level transaction helpers are intentionally absent until the live DB writer lands. |
 
 ## Pipeline data flow (current)
 

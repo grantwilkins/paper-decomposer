@@ -22,7 +22,7 @@ from paper_decomposer.extraction.contracts import (
     ExtractedSetting,
     PaperExtraction,
 )
-from paper_decomposer.extraction.db_writer import ExtractionPersistenceError, build_db_write_plan
+from paper_decomposer.extraction.db_write_plan import ExtractionPersistenceError, build_db_write_plan
 
 
 def _extraction() -> PaperExtraction:
@@ -93,8 +93,14 @@ def test_write_plan_preserves_local_ids_and_evidence() -> None:
     assert setting["local_setting_id"] == "model-1"
     assert setting["metadata"]["evidence_span_ids"] == ["s1"]
 
-    assert any(link["target_kind"] == "method" and link["local_target_id"] == "m1" for link in plan.evidence_links)
-    assert any(link["target_kind"] == "setting" and link["local_target_id"] == "model-1" for link in plan.evidence_links)
+    assert any(
+        link["target_kind"] == "method" and link["local_target_id"] == "m1"
+        for link in plan.local_evidence_links
+    )
+    assert any(
+        link["target_kind"] == "setting" and link["local_target_id"] == "model-1"
+        for link in plan.local_evidence_links
+    )
 
 
 def test_write_plan_keeps_applicability_out_of_method_edges() -> None:

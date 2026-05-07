@@ -13,6 +13,8 @@ _METHOD_EDGE_RELATION = {
 
 
 class DBWritePlan(BaseModel):
+    """Unresolved local-ID rows that the live DB writer must resolve to UUIDs."""
+
     model_config = ConfigDict(extra="forbid")
 
     evidence_spans: list[dict[str, object]] = Field(default_factory=list)
@@ -22,7 +24,7 @@ class DBWritePlan(BaseModel):
     method_setting_links: list[dict[str, object]] = Field(default_factory=list)
     outcomes: list[dict[str, object]] = Field(default_factory=list)
     claims: list[dict[str, object]] = Field(default_factory=list)
-    evidence_links: list[dict[str, object]] = Field(default_factory=list)
+    local_evidence_links: list[dict[str, object]] = Field(default_factory=list)
     warnings: list[ExtractionValidationError] = Field(default_factory=list)
 
 
@@ -61,7 +63,7 @@ def build_db_write_plan(extraction: PaperExtraction) -> DBWritePlan:
                 },
             }
         )
-        plan.evidence_links.extend(_evidence_links(node.evidence_span_ids, "method", node.local_node_id))
+        plan.local_evidence_links.extend(_evidence_links(node.evidence_span_ids, "method", node.local_node_id))
 
     for edge in extraction.edges:
         relation = _METHOD_EDGE_RELATION[edge.relation_kind]
@@ -79,7 +81,7 @@ def build_db_write_plan(extraction: PaperExtraction) -> DBWritePlan:
                 },
             }
         )
-        plan.evidence_links.extend(_evidence_links(edge.evidence_span_ids, "method_edge", local_edge_id))
+        plan.local_evidence_links.extend(_evidence_links(edge.evidence_span_ids, "method_edge", local_edge_id))
 
     for setting in extraction.settings:
         plan.settings.append(
@@ -97,7 +99,7 @@ def build_db_write_plan(extraction: PaperExtraction) -> DBWritePlan:
                 },
             }
         )
-        plan.evidence_links.extend(_evidence_links(setting.evidence_span_ids, "setting", setting.local_setting_id))
+        plan.local_evidence_links.extend(_evidence_links(setting.evidence_span_ids, "setting", setting.local_setting_id))
 
     for link in extraction.method_setting_links:
         local_link_id = f"{link.method_id}->{link.setting_id}:{link.relation_kind}"
@@ -112,7 +114,7 @@ def build_db_write_plan(extraction: PaperExtraction) -> DBWritePlan:
                 "metadata": {"evidence_span_ids": link.evidence_span_ids},
             }
         )
-        plan.evidence_links.extend(_evidence_links(link.evidence_span_ids, "method_setting_link", local_link_id))
+        plan.local_evidence_links.extend(_evidence_links(link.evidence_span_ids, "method_setting_link", local_link_id))
 
     for outcome in extraction.outcomes:
         plan.outcomes.append(
@@ -133,7 +135,7 @@ def build_db_write_plan(extraction: PaperExtraction) -> DBWritePlan:
                 },
             }
         )
-        plan.evidence_links.extend(_evidence_links(outcome.evidence_span_ids, "outcome", outcome.outcome_id))
+        plan.local_evidence_links.extend(_evidence_links(outcome.evidence_span_ids, "outcome", outcome.outcome_id))
 
     for claim in extraction.claims:
         plan.claims.append(
@@ -157,7 +159,7 @@ def build_db_write_plan(extraction: PaperExtraction) -> DBWritePlan:
                 },
             }
         )
-        plan.evidence_links.extend(_evidence_links(claim.evidence_span_ids, "claim", claim.claim_id))
+        plan.local_evidence_links.extend(_evidence_links(claim.evidence_span_ids, "claim", claim.claim_id))
 
     return plan
 

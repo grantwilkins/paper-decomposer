@@ -12,6 +12,7 @@ from .contracts import (
     ExtractedSetting,
     ExtractionCaps,
     ExtractionValidationError,
+    ExtractionValidationReport,
     PaperExtraction,
     ValidationSeverity,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "ExtractedSetting",
     "ExtractionCaps",
     "ExtractionValidationError",
+    "ExtractionValidationReport",
     "PaperExtraction",
     "ValidationSeverity",
     "select_evidence_spans",

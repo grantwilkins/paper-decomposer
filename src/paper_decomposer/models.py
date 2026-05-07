@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import time
 from collections.abc import Mapping
@@ -18,9 +17,10 @@ from .schema import (
     ModelTier,
 )
 
-_TOGETHER_BASE_URL = "https://api.together.xyz/v1"
 _JSON_REPAIR_SUFFIX = "Respond ONLY with valid JSON matching the schema. No preamble, no markdown fences."
 _client: AsyncOpenAI | None = None
+_client_key: tuple[str, str] | None = None
+_requested_client_key: tuple[str, str] | None = None
 
 _COST_TRACKER: dict[str, float | int] = {
     "total_calls": 0,
@@ -46,12 +46,18 @@ class _PreflightStructuredResponse(BaseModel):
 
 
 def _get_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
+    global _client, _client_key
+    if _requested_client_key is None:
+        resolved_config = get_config()
+        client_key = (resolved_config.api_key, resolved_config.raw.api.base_url)
+    else:
+        client_key = _requested_client_key
+    if _client is None or _client_key != client_key:
         _client = AsyncOpenAI(
-            api_key=os.environ["TOGETHER_API_KEY"],
-            base_url=_TOGETHER_BASE_URL,
+            api_key=client_key[0],
+            base_url=client_key[1],
         )
+        _client_key = client_key
     return _client
 
 
@@ -81,6 +87,19 @@ def _get_model_cfg(config: Any, tier: ModelTier) -> Any:
 
 def _get_api_cfg(config: Any) -> Any:
     return _get_value(config, "api")
+
+
+def _get_api_key(config: Any | None) -> str | None:
+    return config.api_key if isinstance(config, AppSettings) else None
+
+
+def _set_requested_client_key(config: Any | None, api_cfg: Any) -> None:
+    global _requested_client_key
+    api_key = _get_api_key(config)
+    if api_key is None:
+        _requested_client_key = None
+        return
+    _requested_client_key = (api_key, str(_get_value(api_cfg, "base_url")))
 
 
 def reset_cost_tracker() -> None:
@@ -121,19 +140,6 @@ def _track_cost(response: Any, model_cfg: Any) -> None:
     _COST_TRACKER["total_cost_usd"] = (
         float(_COST_TRACKER["input_cost_usd"]) + float(_COST_TRACKER["output_cost_usd"])
     )
-
-
-def _parse_first_json_value(text: str) -> Any:
-    decoder = json.JSONDecoder()
-    for idx, char in enumerate(text):
-        if char not in "{[":
-            continue
-        try:
-            value, _ = decoder.raw_decode(text[idx:])
-            return value
-        except json.JSONDecodeError:
-            continue
-    raise json.JSONDecodeError("No JSON object/array found in content.", text, 0)
 
 
 def _extract_structured_json_candidates(content: str) -> list[Any]:
@@ -260,11 +266,6 @@ def _parse_structured_content(content: str, response_schema: type[TResponseModel
     raise ValueError("Structured response did not contain a valid payload for the expected schema.")
 
 
-def _extract_structured_json(content: str) -> Any:
-    candidates = _extract_structured_json_candidates(content)
-    return candidates[0]
-
-
 def _append_json_repair_suffix(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     patched = [dict(message) for message in messages]
     for idx in range(len(patched) - 1, -1, -1):
@@ -292,6 +293,7 @@ async def call_model(
     cfg = _resolve_config(config)
     model_cfg = _get_model_cfg(cfg, tier)
     api_cfg = _get_api_cfg(cfg)
+    _set_requested_client_key(config, api_cfg)
     schema_payload: dict[str, Any] | None = None
 
     kwargs_base: dict[str, Any] = {
@@ -410,37 +412,6 @@ async def call_model(
     raise RuntimeError("Together API call failed without a response.")
 
 
-async def call_model_with_fallback(
-    tier: ModelTier,
-    messages: list[dict[str, Any]],
-    response_schema: type[TResponseModel] | None = None,
-    config: Any | None = None,
-) -> TResponseModel | str:
-    if response_schema is None:
-        return await call_model(
-            tier=tier,
-            messages=messages,
-            response_schema=None,
-            config=config,
-        )
-
-    try:
-        return await call_model(
-            tier=tier,
-            messages=messages,
-            response_schema=response_schema,
-            config=config,
-        )
-    except (ValidationError, ValueError, TypeError, json.JSONDecodeError):
-        repaired_messages = _append_json_repair_suffix(messages)
-        return await call_model(
-            tier=tier,
-            messages=repaired_messages,
-            response_schema=response_schema,
-            config=config,
-        )
-
-
 async def preflight_model_tiers(
     tiers: list[ModelTier],
     *,
@@ -488,7 +459,6 @@ async def preflight_model_tiers(
 __all__ = [
     "ModelPreflightError",
     "call_model",
-    "call_model_with_fallback",
     "get_cost_tracker",
     "preflight_model_tiers",
     "reset_cost_tracker",

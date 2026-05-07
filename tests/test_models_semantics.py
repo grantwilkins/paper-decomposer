@@ -196,6 +196,25 @@ def test_call_model_uses_selected_tier_kwargs_and_returns_plain_text(
     assert "response_format" not in sent
 
 
+def test_model_client_uses_configured_api_key_and_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str] = {}
+
+    class FakeOpenAI:
+        def __init__(self, *, api_key: str, base_url: str) -> None:
+            captured["api_key"] = api_key
+            captured["base_url"] = base_url
+
+    monkeypatch.setattr(model_client, "AsyncOpenAI", FakeOpenAI)
+    monkeypatch.setattr(model_client, "_client", None)
+    monkeypatch.setattr(model_client, "_client_key", None)
+    monkeypatch.setattr(model_client, "_requested_client_key", ("configured-key", "https://example.test/v1"))
+
+    client = model_client._get_client()
+
+    assert isinstance(client, FakeOpenAI)
+    assert captured == {"api_key": "configured-key", "base_url": "https://example.test/v1"}
+
+
 def test_call_model_structured_output_uses_together_schema_and_validates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -591,32 +610,6 @@ def test_call_model_structured_output_parses_flat_claim_list(
     assert len(result.claims) == 1
     assert result.claims[0].claim_id == "s1"
     assert result.claims[0].evidence_artifact_ids == ["Fig. 1"]
-
-
-def test_call_model_with_fallback_recovers_from_schema_validation_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config = _test_config(max_retries=0)
-    completions = _FakeCompletions(
-        [
-            _fake_response('{"wrong": 1}', 12, 7),
-            _fake_response('{"answer": 4}', 12, 7),
-        ]
-    )
-    monkeypatch.setattr(model_client, "_get_client", lambda: _FakeClient(completions))
-
-    result = asyncio.run(
-        model_client.call_model_with_fallback(
-            "small",
-            [{"role": "user", "content": "2+2"}],
-            response_schema=AnswerOutput,
-            config=config,
-        )
-    )
-
-    assert isinstance(result, AnswerOutput)
-    assert result.answer == 4
-    assert len(completions.calls) == 2
 
 
 def test_preflight_model_tiers_raises_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
